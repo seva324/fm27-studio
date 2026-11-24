@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+
+# Redundant raw CSV exports (data/fm_snapshot.db & data/fm27-studies.json ARE tracked)
+data/*.csv
+
+# Local saves, reload staging caches, screenshots & logs
+saves/edits.json
+saves/reloads/
+fmrte-reload-*/
+shots/
+*.log
+*.out
+*.err
+
+# Secrets & API keys (NEVER commit)
+.env
+.env.*
+*.key
+provider.key
+assistant.json
+studio.json
+*secret*
+
+# Internal notes & reverse-engineering scratch tools
+HANDOFF.md
+versions/round*/
+tools/ghhome/
+tools/ghidra_*/
+tools/ghidra_*.bat
+tools/ghidra_*.txt
+tools/*.bin
+tools/*.out
+tools/*.err
+tools/*.log
+tools/mb.txt
+tools/cli_*.txt
+tools/export_h2.sql
+tools/dump_*.py
+tools/gen_role_definitions.py
+tools/make_jumpdata.py
+tools/make_slice.py
+tools/parse_ghidra.py
+tools/probe_*.py
+tools/repro_load.py
+tools/shot_player.py
+tools/who_mbappe.py
+tools/inspect_*.py
+tools/test_live*.py
+tools/test_module_enum.py
+tools/_*.py
+tools/_*.ps1
+
+# OS
+.DS_Store
+Thumbs.db

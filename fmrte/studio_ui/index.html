@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FM27 Studio — Live Editor &amp; AI Assistant</title>
+  <link rel="stylesheet" href="/studio.css" />
+</head>
+<body>
+<div class="app" id="appRoot">
+
+  <!-- TOP EDITORIAL COMMAND BAR -->
+  <header class="topbar">
+    <div class="brand" id="brandHome" title="Open My Club">
+      <div class="brand-dot">F</div>
+      <span>FM27 Studio<span class="brand-accent-dot"></span></span>
+    </div>
+
+    <div class="omnibox">
+      <span class="omni-ico">⌕</span>
+      <input id="globalSearch" type="text" placeholder="Search players, staff, clubs, nations..." autocomplete="off" />
+      <span class="kbd">Ctrl+K</span>
+    </div>
+
+    <div class="spacer"></div>
+
+    <div class="live-badge" id="liveBadge" title="FM27 connection status">
+      <span class="status-dot" id="liveDot"></span>
+      <span id="liveText">Snapshot Only</span>
+    </div>
+
+    <button class="mag-cta magnetic" id="btnAttach" title="Attach to running Football Manager 27">
+      <span id="btnAttachLabel">Load Game</span>
+      <span class="orb">→</span>
+    </button>
+
+    <button class="icon-btn magnetic" id="btnUndo" title="Undo (Ctrl+Z)">↶</button>
+    <button class="icon-btn magnetic" id="btnRedo" title="Redo (Ctrl+Y)">↷</button>
+    <button class="icon-btn active magnetic" id="toggleLeft" title="Toggle Left Sidebar">◧</button>
+    <button class="icon-btn active magnetic" id="toggleRight" title="Toggle AI Assistant">◨</button>
+  </header>
+
+  <!-- 3-PANE RESIZABLE SHELL WITH FLOATING ‹ › DRAG HANDLES -->
+  <div class="shell" id="shell">
+
+    <!-- LEFT NAVIGATION RAIL -->
+    <aside class="pane-left" id="paneLeft">
+      <div class="nav-scroll">
+        <div class="nav-group">Workspace</div>
+        <div class="nav-item magnetic" data-nav="myclub" id="navMyClub">
+          <span class="ico">⌂</span>
+          <span class="lbl" id="navMyClubLabel">My Club</span>
+        </div>
+        <div class="nav-item magnetic" data-nav="search">
+          <span class="ico">⌕</span>
+          <span class="lbl">People Search</span>
+        </div>
+        <div class="nav-item magnetic" data-nav="transfers">
+          <span class="ico">⇄</span>
+          <span class="lbl">Future Transfers</span>
+        </div>
+        <div class="nav-item magnetic" data-nav="retirements">
+          <span class="ico">◷</span>
+          <span class="lbl">Retirements</span>
+        </div>
+        <div class="nav-item magnetic" data-nav="history">
+          <span class="ico">≡</span>
+          <span class="lbl">Edit History</span>
+          <span class="nav-pill" id="navHistoryBadge">0</span>
+        </div>
+
+        <div class="nav-group nav-group-spaced">
+          <span>Recent &amp; Pinned</span>
+          <button class="nav-clear-btn" id="btnClearRecent" title="Clear unpinned items">Clear</button>
+        </div>
+        <div id="recentNavList"></div>
+      </div>
+
+      <div class="nav-footer">
+        <button class="footer-link" id="btnSettings">⚙ AI &amp; App Settings</button>
+        <span id="navBuild">Build —</span>
+      </div>
+    </aside>
+
+    <!-- RESIZABLE DIVIDER 1 -->
+    <div class="divider" id="divLeft" title="Drag to resize navigation">
+      <div class="divider-handle">‹›</div>
+    </div>
+
+    <!-- CENTER ENTITY WORKSPACE -->
+    <main class="pane-center" id="paneCenter">
+      <div class="center-scroll" id="centerBody">
+        <div class="empty-state">Loading FM27 Studio…</div>
+      </div>
+
+      <!-- FLOATING BOTTOM GLASS DOCK + EXPANDABLE QUICK ACTIONS TOOLBAR -->
+      <div class="floating-dock-anchor" id="floatingDockAnchor">
+        <div class="dock-popover collapsed" id="dockPopover"></div>
+        <div class="floating-dock" id="floatingDock">
+          <button class="dock-ico magnetic" id="dockMyClub" title="My Club">⌂</button>
+          <button class="dock-ico magnetic" id="dockSearch" title="People Search">⌕</button>
+          <button class="dock-plus magnetic" id="dockPlus" title="Quick Actions (Heal / Inspire)">+</button>
+          <button class="dock-ico magnetic" id="dockSave" title="Save Edits (Ctrl+S)">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+              <polyline points="17 21 17 13 7 13 7 21"/>
+              <polyline points="7 3 7 8 15 8"/>
+            </svg>
+          </button>
+          <button class="dock-ico magnetic" id="dockUndo" title="Undo Last Edit (Ctrl+Z)">↶</button>
+        </div>
+      </div>
+    </main>
+
+    <!-- RESIZABLE DIVIDER 2 -->
+    <div class="divider" id="divRight" title="Drag to resize AI Assistant">
+      <div class="divider-handle">‹›</div>
+    </div>
+
+    <!-- RIGHT DOCKED AI ASSISTANT (DEFAULT EXPANDED) -->
+    <aside class="pane-right" id="paneRight">
+      <div class="ai-head">
+        <div class="ai-title">
+          <div class="ai-mark">✦</div>
+          <span>AI Assistant</span>
+        </div>
+        <div class="ai-head-btns">
+          <button class="icon-btn icon-sm magnetic" id="btnNewChat" title="New Chat">+</button>
+          <button class="icon-btn icon-sm magnetic" id="btnAiSettings" title="AI Provider &amp; API Key">⚙</button>
+          <button class="icon-btn icon-sm magnetic" id="closeRight" title="Collapse AI Panel">×</button>
+        </div>
+      </div>
+
+      <div class="ai-modes">
+        <div class="ai-seg">
+          <div class="ai-mode active" data-aimode="chat">Chat</div>
+          <div class="ai-mode" data-aimode="tactics">Tactics</div>
+          <div class="ai-mode" data-aimode="training">Training</div>
+        </div>
+      </div>
+
+      <div class="ai-ctx">
+        <span class="ai-ctx-left">
+          <span class="status-dot active"></span>
+          <strong id="aiCtxText">No active entity</strong>
+        </span>
+        <span class="ai-ctx-tag">Auto-sync</span>
+      </div>
+
+      <div class="ai-body" id="aiBody">
+        <!-- CHAT TAB -->
+        <div class="ai-panel-view active" id="aiViewChat">
+          <div id="chatThread" class="chat-thread"></div>
+        </div>
+
+        <!-- TACTICS TAB -->
+        <div class="ai-panel-view" id="aiViewTactics">
+          <div class="plan-controls">
+            <select id="tacticStyleSelect" class="mini-select">
+              <option value="Balanced">Balanced</option>
+              <option value="Gegenpress">Gegenpress</option>
+              <option value="Tiki-Taka">Tiki-Taka</option>
+              <option value="Fluid Counter-Attack">Counter-Attack</option>
+              <option value="Direct Counter-Attack">Direct</option>
+              <option value="Wing Play">Wing Play</option>
+            </select>
+            <button class="mini-btn magnetic" id="btnRebuildTactic">Build Best XI</button>
+          </div>
+          <div id="tacticsContent" class="plan-host">
+            <div class="empty-note">Switch to Tactics to compute squad Best XI.</div>
+          </div>
+        </div>
+
+        <!-- TRAINING TAB -->
+        <div class="ai-panel-view" id="aiViewTraining">
+          <div class="plan-controls">
+            <select id="trainingFocusSelect" class="mini-select">
+              <option value="Balanced">Balanced</option>
+              <option value="Attacking">Attacking</option>
+              <option value="Defending">Defending</option>
+              <option value="Tactical">Tactical</option>
+              <option value="Physical">Physical</option>
+              <option value="Recovery">Recovery</option>
+            </select>
+            <button class="mini-btn magnetic" id="btnRebuildTraining">Generate Week</button>
+          </div>
+          <div id="trainingContent" class="plan-host">
+            <div class="empty-note">Generate a 7-day FM27 training schedule.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SLASH COMMAND PALETTE (/) -->
+      <div class="cmd-palette" id="cmdPalette">
+        <div class="cmd-search">
+          <span>⌕ &nbsp;AI Command Palette</span>
+          <span class="kbd">↑↓ · ↵</span>
+        </div>
+        <div id="cmdList"></div>
+      </div>
+
+      <!-- COMPOSER -->
+      <div class="ai-composer" id="aiComposer">
+        <div class="composer-box">
+          <textarea id="chatInput" placeholder="Type / for commands, or ask about this player, club or tactic…"></textarea>
+          <div class="composer-foot">
+            <div class="composer-left">
+              <button class="slash-pill magnetic" id="btnSlashCmd">/ Commands</button>
+              <span class="model-caption" id="modelCaption">—</span>
+            </div>
+            <button class="mag-cta mag-cta-sm magnetic" id="btnSend">
+              <span>Send</span>
+              <span class="orb">→</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+  </div>
+
+  <!-- SLIM STATUS BAR -->
+  <footer class="statusbar">
+    <div id="statusCounts">Loading snapshot…</div>
+    <div class="status-center" id="statusWriteMode">
+      <span class="status-dot" id="statusBottomDot"></span>
+      <span id="statusWriteText">Snapshot mode · Press Load Game to write into FM27</span>
+    </div>
+    <div class="status-right">
+      <span>Zoom</span>
+      <input type="range" min="85" max="130" value="100" id="zoomSlider" />
+      <span id="zoomLabel">100%</span>
+    </div>
+  </footer>
+
+</div>
+
+<!-- SETTINGS MODAL -->
+<div class="modal-backdrop" id="settingsModal">
+  <div class="modal-card">
+    <div class="modal-head">
+      <strong>AI Assistant &amp; Studio Settings</strong>
+      <button class="icon-btn icon-sm" id="closeSettings">×</button>
+    </div>
+    <div class="modal-body">
+      <label class="form-row">
+        <span>Provider</span>
+        <select id="setProvider" class="form-input"></select>
+      </label>
+      <label class="form-row">
+        <span>Base URL</span>
+        <input id="setBaseUrl" class="form-input" type="text" placeholder="https://..." />
+      </label>
+      <label class="form-row">
+        <span>Model</span>
+        <div class="input-inline-row">
+          <input id="setModel" class="form-input" type="text" placeholder="Enter or fetch model ID" />
+          <button type="button" class="mini-btn" id="btnFetchModels" title="Fetch available models from provider">Fetch Models</button>
+        </div>
+        <select id="setModelSelect" class="form-input" style="display:none;margin-top:4px;"></select>
+        <div class="modal-note" id="setModelsStatus" style="display:none;"></div>
+      </label>
+      <label class="form-row">
+        <span>Reasoning</span>
+        <select id="setReasoning" class="form-input">
+          <option value="Default">Default</option>
+          <option value="Low">Low</option>
+          <option value="Medium">Medium</option>
+          <option value="High">High</option>
+        </select>
+      </label>
+      <label class="form-row">
+        <span>API Key (DPAPI encrypted)</span>
+        <input id="setApiKey" class="form-input" type="password" placeholder="Leave blank to keep existing key" />
+      </label>
+      <div class="modal-note" id="setKeyStatus">Key status: —</div>
+      <label class="form-row">
+        <span>FM27 Graphics / Facepack Folder</span>
+        <input id="setGraphicsDir" class="form-input" type="text" placeholder="Auto-detected Sports Interactive\\Football Manager 27\\graphics" />
+      </label>
+      <div class="modal-note" id="setFacesStatus">Facepack: —</div>
+    </div>
+    <div class="modal-foot">
+      <button class="mini-btn" id="btnClearKey">Clear Key</button>
+      <div class="spacer"></div>
+      <button class="mini-btn" id="btnCancelSettings">Cancel</button>
+      <button class="mag-cta mag-cta-sm magnetic" id="btnSaveSettings">
+        <span>Save</span><span class="orb">→</span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- STACKED TOAST NOTIFICATIONS (Reference #20) -->
+<div class="toast-stack" id="toastStack"></div>
+
+<script src="/studio.js"></script>
+</body>
+</html>

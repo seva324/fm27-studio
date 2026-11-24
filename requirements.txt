@@ -1,0 +1,2 @@
+# This is a Python project; the app itself uses only the standard library.
+# Tkinter ships with the Python installer on Windows.

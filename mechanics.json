@@ -1,0 +1,1324 @@
+{
+  "version": 1,
+  "values": [
+    {
+      "name": "current ability range",
+      "group": "player",
+      "value": 200,
+      "unit": "max",
+      "source": "PlayerRecordLayout.currentAbilityRel=-36; snapshot 1-192"
+    },
+    {
+      "name": "potential ability range",
+      "group": "player",
+      "value": 200,
+      "unit": "max",
+      "source": "PlayerRecordLayout.potentialAbilityRel=-34"
+    },
+    {
+      "name": "attribute range",
+      "group": "player",
+      "value": 20,
+      "unit": "max",
+      "source": "fm_snapshot.db players attributes; observed 1-20"
+    },
+    {
+      "name": "condition full",
+      "group": "player",
+      "value": 10000,
+      "unit": "raw",
+      "source": "Presets/Heal.json; snapshot 3400-10000"
+    },
+    {
+      "name": "match sharpness full",
+      "group": "player",
+      "value": 10000,
+      "unit": "raw",
+      "source": "Presets/Heal.json; snapshot 3500-10000"
+    },
+    {
+      "name": "jadedness range",
+      "group": "player",
+      "value": "-1000..1000",
+      "unit": "raw",
+      "source": "Presets/Destroy.json writes 1000; save holds -125 (signed)"
+    },
+    {
+      "name": "morale range",
+      "group": "player",
+      "value": 20,
+      "unit": "max",
+      "source": "Presets/Inspire.json; snapshot 1-20"
+    },
+    {
+      "name": "reputation range",
+      "group": "player",
+      "value": 10000,
+      "unit": "max",
+      "source": "snapshot 50-9600"
+    },
+    {
+      "name": "height range",
+      "group": "player",
+      "value": "150..230",
+      "unit": "cm",
+      "source": "snapshot 152-206; accepted edit range"
+    },
+    {
+      "name": "key attributes weight",
+      "group": "rating",
+      "value": 16,
+      "unit": "weight",
+      "source": "Ratings/rolesAndDuties.json KeyAttributesWeight; not compiled in - 16,4,3 has 0 byte matches in the image, so it is loaded at run time"
+    },
+    {
+      "name": "preferable attributes weight",
+      "group": "rating",
+      "value": 4,
+      "unit": "weight",
+      "source": "Ratings/rolesAndDuties.json PreferableAttributesWeight"
+    },
+    {
+      "name": "avoid attributes weight",
+      "group": "rating",
+      "value": 3,
+      "unit": "weight",
+      "source": "Ratings/rolesAndDuties.json AvoidAttributesWeight"
+    },
+    {
+      "name": "rating settings version",
+      "group": "rating",
+      "value": "27.0.0.0",
+      "unit": "version",
+      "source": "Ratings/rolesAndDuties.json SettingsVersion"
+    },
+    {
+      "name": "rating formula",
+      "group": "rating",
+      "value": "truncate(float32(keySum/(keyCount*20))*100, 2)",
+      "unit": "percent",
+      "source": "derived from Ratings/rolesAndDuties.json and verified against the original's header (77.49%); only WideForward/InPossession key-only reproduces 77.49 across every role and duty in the map"
+    },
+    {
+      "name": "rating key attributes",
+      "group": "rating",
+      "value": 8,
+      "unit": "count",
+      "source": "WideForward/InPossession role definition"
+    },
+    {
+      "name": "position penalty ladder",
+      "group": "rating",
+      "value": "76,72,68,64,60,56,52,48,44,40,36,20,17,15,5,4,3,2,1,0",
+      "unit": "percent",
+      "source": "code: data at .rdata 0x14517BB38 (20 x int32); built into the settings object slot +0x18 by 0x14074046A call / 0x14074046F store, and read back by the getter at 0x1407400F0 (mov rax,[rcx+0x18])"
+    },
+    {
+      "name": "position penalty ladder length",
+      "group": "rating",
+      "value": 20,
+      "unit": "count",
+      "source": "code: 0x140741F50 passes 0x14 to the array allocator and copies 0x50 bytes; 0x1407404C0 rejects the array at +0x18 unless *(int*)(arr+8) == 0x14"
+    },
+    {
+      "name": "position penalty in best position",
+      "group": "rating",
+      "value": 0,
+      "unit": "percent",
+      "source": "derived: ladder read from the far end; verified 0 for all 42344 players in their best position"
+    },
+    {
+      "name": "position penalty out of position",
+      "group": "rating",
+      "value": 76,
+      "unit": "percent",
+      "source": "code: first ladder entry at 0x14517BB38; applied when competence is far below the player's best"
+    },
+    {
+      "name": "role chosen from best position",
+      "group": "rating",
+      "value": true,
+      "unit": "flag",
+      "source": "config.json HighlightBestRoleDutyAutomatically=true; verified Pulisic AMR 20 -> Wide Forward, matching the original"
+    },
+    {
+      "name": "team selection position weight",
+      "group": "rating",
+      "value": 150,
+      "unit": "weight",
+      "source": "Ratings/teamSelection.json"
+    },
+    {
+      "name": "team selection role weight",
+      "group": "rating",
+      "value": 80,
+      "unit": "weight",
+      "source": "Ratings/teamSelection.json"
+    },
+    {
+      "name": "team selection CA weight",
+      "group": "rating",
+      "value": 120,
+      "unit": "weight",
+      "source": "Ratings/teamSelection.json"
+    },
+    {
+      "name": "team selection PA weight",
+      "group": "rating",
+      "value": 90,
+      "unit": "weight",
+      "source": "Ratings/teamSelection.json"
+    },
+    {
+      "name": "team selection fitness weight",
+      "group": "rating",
+      "value": 80,
+      "unit": "weight",
+      "source": "Ratings/teamSelection.json"
+    },
+    {
+      "name": "team selection reputation weight",
+      "group": "rating",
+      "value": 35,
+      "unit": "weight",
+      "source": "Ratings/teamSelection.json"
+    },
+    {
+      "name": "team selection morale weight",
+      "group": "rating",
+      "value": 15,
+      "unit": "weight",
+      "source": "Ratings/teamSelection.json"
+    },
+    {
+      "name": "wonderkid key band 15-18",
+      "group": "rating",
+      "value": 45,
+      "unit": "percent",
+      "source": "Ratings/wonderkidGenerator.json KeyAttributesProbabilities"
+    },
+    {
+      "name": "wonderkid regular band 12-14",
+      "group": "rating",
+      "value": 40,
+      "unit": "percent",
+      "source": "Ratings/wonderkidGenerator.json RegularAttributesProbabilities"
+    },
+    {
+      "name": "people table slot",
+      "group": "memory",
+      "value": 336,
+      "unit": "bytes",
+      "source": "FmOffsets.SLOTS PeopleOffset"
+    },
+    {
+      "name": "table RVA build 2494687",
+      "group": "memory",
+      "value": 92407336,
+      "unit": "rva",
+      "source": "FmOffsets.BUILD_TO_TABLE_RVA"
+    },
+    {
+      "name": "table RVA build 2493426",
+      "group": "memory",
+      "value": 91248104,
+      "unit": "rva",
+      "source": "FmOffsets.BUILD_TO_TABLE_RVA"
+    },
+    {
+      "name": "table RVA build 2486695",
+      "group": "memory",
+      "value": 91239912,
+      "unit": "rva",
+      "source": "FmOffsets.BUILD_TO_TABLE_RVA"
+    },
+    {
+      "name": "table vector pointer",
+      "group": "memory",
+      "value": 128,
+      "unit": "bytes",
+      "source": "FmOffsets.tableBounds"
+    },
+    {
+      "name": "unique id offset",
+      "group": "memory",
+      "value": 12,
+      "unit": "bytes",
+      "source": "PlayerRecordLayout.Direct uniqueIdRel"
+    },
+    {
+      "name": "current ability offset",
+      "group": "memory",
+      "value": -36,
+      "unit": "bytes",
+      "source": "PlayerRecordLayout.Direct currentAbilityRel"
+    },
+    {
+      "name": "potential ability offset",
+      "group": "memory",
+      "value": -34,
+      "unit": "bytes",
+      "source": "PlayerRecordLayout.Direct potentialAbilityRel"
+    },
+    {
+      "name": "condition offset",
+      "group": "memory",
+      "value": -44,
+      "unit": "bytes",
+      "source": "PlayerRecordLayout.Direct conditionRel"
+    },
+    {
+      "name": "jadedness offset",
+      "group": "memory",
+      "value": -46,
+      "unit": "bytes",
+      "source": "PlayerRecordLayout.Direct jadednessRel"
+    },
+    {
+      "name": "sharpness offset",
+      "group": "memory",
+      "value": -48,
+      "unit": "bytes",
+      "source": "PlayerRecordLayout.Direct matchSharpnessRel"
+    },
+    {
+      "name": "morale offset",
+      "group": "memory",
+      "value": -28,
+      "unit": "bytes",
+      "source": "PlayerRecordLayout.Direct moraleRel"
+    },
+    {
+      "name": "home reputation offset",
+      "group": "memory",
+      "value": -42,
+      "unit": "bytes",
+      "source": "PlayerRecordLayout.Direct homeReputationRel"
+    },
+    {
+      "name": "current reputation offset",
+      "group": "memory",
+      "value": -40,
+      "unit": "bytes",
+      "source": "PlayerRecordLayout.Direct currentReputationRel"
+    },
+    {
+      "name": "world reputation offset",
+      "group": "memory",
+      "value": -38,
+      "unit": "bytes",
+      "source": "PlayerRecordLayout.Direct worldReputationRel"
+    },
+    {
+      "name": "player block read",
+      "group": "memory",
+      "value": 1024,
+      "unit": "bytes",
+      "source": "PlayerExporter block read; FMRTE fixed 0x400 at 0x84507D"
+    },
+    {
+      "name": "read wrapper",
+      "group": "memory",
+      "value": "0x1408410A0",
+      "unit": "address",
+      "source": "FMRTE native_function_pseudocode; handover section 1.6"
+    },
+    {
+      "name": "RPM call",
+      "group": "memory",
+      "value": "0x140841289",
+      "unit": "address",
+      "source": "FMRTE handover section 1.5"
+    },
+    {
+      "name": "position listing threshold",
+      "group": "display",
+      "value": 15,
+      "unit": "rating",
+      "source": "chosen so Pulisic lists AML/AMC/AMR as in the reference",
+      "estimated": true
+    },
+    {
+      "name": "shirt number Pulisic",
+      "group": "display",
+      "value": 11,
+      "unit": "number",
+      "source": "reference picture; snapshot has no shirt number",
+      "estimated": true
+    },
+    {
+      "name": "game date",
+      "group": "save",
+      "value": "2026-07-20",
+      "unit": "date",
+      "source": "fm_snapshot.db metadata game_date"
+    },
+    {
+      "name": "snapshot players",
+      "group": "save",
+      "value": 42344,
+      "unit": "rows",
+      "source": "fm_snapshot.db players count"
+    },
+    {
+      "name": "snapshot staff",
+      "group": "save",
+      "value": 23309,
+      "unit": "rows",
+      "source": "fm_snapshot.db staff count"
+    },
+    {
+      "name": "snapshot clubs",
+      "group": "save",
+      "value": 42129,
+      "unit": "rows",
+      "source": "fm_snapshot.db clubs count"
+    },
+    {
+      "name": "snapshot competitions",
+      "group": "save",
+      "value": 6625,
+      "unit": "rows",
+      "source": "fm_snapshot.db competitions count"
+    },
+    {
+      "name": "heal condition",
+      "group": "preset",
+      "value": 10000,
+      "unit": "raw",
+      "source": "Presets/Heal.json"
+    },
+    {
+      "name": "heal sharpness",
+      "group": "preset",
+      "value": 10000,
+      "unit": "raw",
+      "source": "Presets/Heal.json"
+    },
+    {
+      "name": "destroy condition",
+      "group": "preset",
+      "value": 5000,
+      "unit": "raw",
+      "source": "Presets/Destroy.json"
+    },
+    {
+      "name": "destroy morale",
+      "group": "preset",
+      "value": 0,
+      "unit": "raw",
+      "source": "Presets/Destroy.json"
+    },
+    {
+      "name": "inspire morale",
+      "group": "preset",
+      "value": 20,
+      "unit": "raw",
+      "source": "Presets/Inspire.json"
+    },
+    {
+      "name": "table scan range",
+      "group": "memory",
+      "value": 100663296,
+      "unit": "bytes",
+      "source": "FmOffsets.GAME_PLUGIN_SCAN_RANGE"
+    },
+    {
+      "name": "table scan chunk",
+      "group": "memory",
+      "value": 1048576,
+      "unit": "bytes",
+      "source": "FmOffsets.SCAN_CHUNK_BYTES"
+    },
+    {
+      "name": "minimum table score",
+      "group": "memory",
+      "value": 35,
+      "unit": "points",
+      "source": "FmOffsets.MIN_VALID_TABLE_SCORE (of 47)"
+    },
+    {
+      "name": "continent slot",
+      "group": "memory",
+      "value": 264,
+      "unit": "bytes",
+      "source": "FmOffsets.SLOTS ContinentOffset"
+    },
+    {
+      "name": "region slot",
+      "group": "memory",
+      "value": 352,
+      "unit": "bytes",
+      "source": "FmOffsets.SLOTS RegionOffset"
+    },
+    {
+      "name": "player subtype",
+      "group": "memory",
+      "value": 648,
+      "unit": "rtti",
+      "source": "PersonIdentityLayout.currentSubtypes().player()"
+    },
+    {
+      "name": "staff subtype",
+      "group": "memory",
+      "value": 256,
+      "unit": "rtti",
+      "source": "PersonIdentityLayout.currentSubtypes().staff()"
+    },
+    {
+      "name": "human manager subtype",
+      "group": "memory",
+      "value": 1088,
+      "unit": "rtti",
+      "source": "PersonIdentityLayout.currentSubtypes().humanManager()"
+    },
+    {
+      "name": "running game build",
+      "group": "memory",
+      "value": 2505117,
+      "unit": "build",
+      "source": "game_plugin.dll product version 27.1.0+2505117; not in the three registered RVAs"
+    },
+    {
+      "name": "table scan time",
+      "group": "memory",
+      "value": 1.7,
+      "unit": "seconds",
+      "source": "measured over a 96 MiB image with 35% plausible pointers"
+    },
+    {
+      "name": "live attribute refresh",
+      "group": "memory",
+      "value": false,
+      "source": "attribute block base/stride not recovered; attributes stay from the snapshot",
+      "estimated": true
+    },
+    {
+      "name": "module info argument type",
+      "group": "memory",
+      "value": "MODULEINFO*",
+      "unit": "ctypes",
+      "source": "psapi.GetModuleInformation argtypes[2]; declared POINTER(c_void_p) it raised 'argument 3: TypeError' on Load Game, fixed to c_void_p (tools/probe_ctypes.py)"
+    },
+    {
+      "name": "player count",
+      "group": "snapshot",
+      "value": 42344,
+      "unit": "players",
+      "source": "fm_snapshot.db players table; matches the original status bar"
+    },
+    {
+      "name": "staff count",
+      "group": "snapshot",
+      "value": 23309,
+      "unit": "staff",
+      "source": "fm_snapshot.db staff table; matches the original status bar"
+    },
+    {
+      "name": "club count",
+      "group": "snapshot",
+      "value": 42129,
+      "unit": "clubs",
+      "source": "fm_snapshot.db clubs table; matches the original status bar"
+    },
+    {
+      "name": "competition count",
+      "group": "snapshot",
+      "value": 6625,
+      "unit": "competitions",
+      "source": "fm_snapshot.db competitions table; matches the original status bar"
+    },
+    {
+      "name": "pulisic unique id",
+      "group": "case",
+      "value": 92074020,
+      "unit": "id",
+      "source": "fm_snapshot.db players.unique_id; reference/picture-2.png"
+    },
+    {
+      "name": "pulisic current ability",
+      "group": "case",
+      "value": 158,
+      "unit": "ca",
+      "source": "fm_snapshot.db players.ca; reference/picture-2.png header"
+    },
+    {
+      "name": "pulisic potential ability",
+      "group": "case",
+      "value": 163,
+      "unit": "pa",
+      "source": "fm_snapshot.db players.pa; reference/picture-2.png header"
+    },
+    {
+      "name": "pulisic condition",
+      "group": "case",
+      "value": 9417,
+      "unit": "raw",
+      "source": "fm_snapshot.db players.condition; reference/picture-2.png bottom strip"
+    },
+    {
+      "name": "pulisic match sharpness",
+      "group": "case",
+      "value": 3500,
+      "unit": "raw",
+      "source": "fm_snapshot.db players.match_sharpness; reference/picture-2.png bottom strip"
+    },
+    {
+      "name": "pulisic jadedness",
+      "group": "case",
+      "value": -125,
+      "unit": "raw",
+      "source": "fm_snapshot.db players.jadedness; reference/picture-2.png bottom strip"
+    },
+    {
+      "name": "pulisic morale",
+      "group": "case",
+      "value": 14,
+      "unit": "raw",
+      "source": "fm_snapshot.db players.morale; reference/picture-2.png bottom strip"
+    },
+    {
+      "name": "pulisic asking price",
+      "group": "case",
+      "value": 48900392,
+      "unit": "gbp",
+      "source": "fm_snapshot.db players.asking_price_raw; reference/picture-2.png header"
+    },
+    {
+      "name": "pulisic weekly wage",
+      "group": "case",
+      "value": 84746,
+      "unit": "gbp",
+      "source": "fm_snapshot.db players.salary_weekly_raw; reference/picture-2.png header"
+    },
+    {
+      "name": "pulisic role rating",
+      "group": "case",
+      "value": 77.5,
+      "unit": "percent",
+      "source": "key attributes 124/160; reference/picture-2.png shows 77.49%"
+    },
+    {
+      "name": "ac milan reputation",
+      "group": "case",
+      "value": 8300,
+      "unit": "reputation",
+      "source": "fm_snapshot.db clubs.reputation where id=5598; reference/picture-3.png"
+    },
+    {
+      "name": "ac milan training facilities",
+      "group": "case",
+      "value": 19,
+      "unit": "rating",
+      "source": "fm_snapshot.db clubs.training_facilities; reference/picture-3.png"
+    },
+    {
+      "name": "ac milan youth coaching",
+      "group": "case",
+      "value": 15,
+      "unit": "rating",
+      "source": "fm_snapshot.db clubs.youth_coaching; reference/picture-3.png"
+    },
+    {
+      "name": "ac milan next fixture date",
+      "group": "case",
+      "value": "2026-07-25",
+      "unit": "date",
+      "source": "fm_snapshot.db fixtures.kickoff_date; reference/picture-3.png"
+    },
+    {
+      "name": "attribute clamp maximum",
+      "group": "rating",
+      "value": 20,
+      "unit": "max",
+      "source": "code: mov r8d,0x14 at 0x1411782B8, passed to the clamp helper sub_1404446B0 (0x1404446B0) with minimum 0 (xor r9d,r9d)"
+    },
+    {
+      "name": "ability clamp maximum",
+      "group": "rating",
+      "value": 200,
+      "unit": "max",
+      "source": "code: mov r8d,0xC8 at 0x1411D0A48, passed to sub_1404446B0"
+    },
+    {
+      "name": "condition clamp maximum",
+      "group": "rating",
+      "value": 10000,
+      "unit": "max",
+      "source": "code: mov r8d,0x2710 at 0x14102D4E0, passed to sub_1404446B0; same site clamps sharpness and reputation"
+    },
+    {
+      "name": "rating display decimals",
+      "group": "rating",
+      "value": 2,
+      "unit": "decimals",
+      "source": "code: the original's header reads 77.49 for 124/160, which is the float32 ratio 0.7749999761581421 truncated to 2 decimals"
+    },
+    {
+      "name": "rating ratio precision",
+      "group": "rating",
+      "value": 0.7749999761581421,
+      "unit": "float32",
+      "source": "derived: 124/160 stored as a float32; x100 = 77.49999761581421, truncated to 77.49 exactly as the original's header shows"
+    },
+    {
+      "name": "jadedness clamp minimum",
+      "group": "rating",
+      "value": -10000,
+      "unit": "min",
+      "source": "Presets/Destroy.json writes 1000 and the save holds -125, so jadedness is signed and is not clamped at 0"
+    },
+    {
+      "name": "person unique id offset",
+      "group": "memory",
+      "value": 12,
+      "unit": "bytes from person",
+      "source": "PlayerRecordLayout$Direct.uniqueIdRel() = 12"
+    },
+    {
+      "name": "current ability offset",
+      "group": "memory",
+      "value": -36,
+      "unit": "bytes from person",
+      "source": "PlayerRecordLayout$Direct.currentAbilityRel() = -36"
+    },
+    {
+      "name": "potential ability offset",
+      "group": "memory",
+      "value": -34,
+      "unit": "bytes from person",
+      "source": "PlayerRecordLayout$Direct.potentialAbilityRel() = -34"
+    },
+    {
+      "name": "condition offset",
+      "group": "memory",
+      "value": -44,
+      "unit": "bytes from person",
+      "source": "PlayerRecordLayout$Direct.conditionRel() = -44"
+    },
+    {
+      "name": "match sharpness offset",
+      "group": "memory",
+      "value": -48,
+      "unit": "bytes from person",
+      "source": "PlayerRecordLayout$Direct.matchSharpnessRel() = -48"
+    },
+    {
+      "name": "jadedness offset",
+      "group": "memory",
+      "value": -46,
+      "unit": "bytes from person",
+      "source": "PlayerRecordLayout$Direct.jadednessRel() = -46"
+    },
+    {
+      "name": "morale offset",
+      "group": "memory",
+      "value": -28,
+      "unit": "bytes from person",
+      "source": "PlayerRecordLayout$Direct.moraleRel() = -28"
+    },
+    {
+      "name": "home reputation offset",
+      "group": "memory",
+      "value": -42,
+      "unit": "bytes from person",
+      "source": "PlayerRecordLayout$Direct.homeReputationRel() = -42"
+    },
+    {
+      "name": "current reputation offset",
+      "group": "memory",
+      "value": -40,
+      "unit": "bytes from person",
+      "source": "PlayerRecordLayout$Direct.currentReputationRel() = -40"
+    },
+    {
+      "name": "world reputation offset",
+      "group": "memory",
+      "value": -38,
+      "unit": "bytes from person",
+      "source": "PlayerRecordLayout$Direct.worldReputationRel() = -38"
+    },
+    {
+      "name": "asking price offset",
+      "group": "memory",
+      "value": -84,
+      "unit": "bytes from person",
+      "source": "PlayerRecordLayout$Direct.displayValueRel() = -84"
+    },
+    {
+      "name": "height offset",
+      "group": "memory",
+      "value": -90,
+      "unit": "bytes from person",
+      "source": "PlayerRecordLayout$Direct.heightCmRel() = -90"
+    },
+    {
+      "name": "attribute block offset",
+      "group": "memory",
+      "value": -314,
+      "unit": "bytes from person",
+      "source": "PlayerRecordLayout$Direct.historyCopySourceRel() = -314"
+    },
+    {
+      "name": "attribute index base",
+      "group": "memory",
+      "value": 40,
+      "unit": "bytes into block",
+      "source": "AttributeDefinitions.SOURCE_OBJECT_BASE_OFFSET = 40"
+    },
+    {
+      "name": "attribute storage scale",
+      "group": "memory",
+      "value": 5,
+      "unit": "stored per shown point",
+      "source": "AttributeDefinitions.norm20: round(v*20/100), so 1 shown point = 5 stored"
+    },
+    {
+      "name": "registration pointer offset",
+      "group": "memory",
+      "value": 168,
+      "unit": "bytes from person",
+      "source": "PlayerRecordLayout$Direct.registrationRefRel() = 168"
+    },
+    {
+      "name": "weekly wage offset",
+      "group": "memory",
+      "value": 32,
+      "unit": "bytes from registration",
+      "source": "PlayerRecordLayout$Registration.salaryWeeklyRel() = 32"
+    },
+    {
+      "name": "contract end offset",
+      "group": "memory",
+      "value": 72,
+      "unit": "bytes from registration",
+      "source": "PlayerRecordLayout$Registration.contractDateRel() = 72"
+    },
+    {
+      "name": "joined club offset",
+      "group": "memory",
+      "value": 76,
+      "unit": "bytes from registration",
+      "source": "PlayerRecordLayout$Registration.joinedDateRel() = 76"
+    },
+    {
+      "name": "date day mask",
+      "group": "memory",
+      "value": 511,
+      "unit": "mask",
+      "source": "PlayerExporter.DATE_DAY_MASK = 511; day of year then year"
+    },
+    {
+      "name": "people slot",
+      "group": "memory",
+      "value": 336,
+      "unit": "bytes into offset table",
+      "source": "FmOffsets.SLOTS PeopleOffset = 336"
+    },
+    {
+      "name": "collection vector pointer",
+      "group": "memory",
+      "value": 128,
+      "unit": "bytes into collection",
+      "source": "FmOffsets.tableBounds reads collection + 128"
+    },
+    {
+      "name": "offset table scan range",
+      "group": "memory",
+      "value": 100663296,
+      "unit": "bytes",
+      "source": "FmOffsets.GAME_PLUGIN_SCAN_RANGE = 100663296"
+    },
+    {
+      "name": "offset table minimum score",
+      "group": "memory",
+      "value": 35,
+      "unit": "points of 47",
+      "source": "FmOffsets.MIN_VALID_TABLE_SCORE = 35"
+    },
+    {
+      "name": "interface scale default",
+      "group": "ui",
+      "value": 1.1,
+      "unit": "factor",
+      "source": "config.json InterfaceScale = 1.1"
+    },
+    {
+      "name": "interface scale minimum",
+      "group": "ui",
+      "value": 0.8,
+      "unit": "factor",
+      "source": "estimated: the original slider has no published bounds"
+    },
+    {
+      "name": "interface scale maximum",
+      "group": "ui",
+      "value": 1.5,
+      "unit": "factor",
+      "source": "estimated: the original slider has no published bounds"
+    },
+    {
+      "name": "interface scale step",
+      "group": "ui",
+      "value": 0.05,
+      "unit": "factor",
+      "source": "estimated: the original slider has no published bounds"
+    },
+    {
+      "name": "player attribute count",
+      "group": "player",
+      "value": 54,
+      "unit": "attributes",
+      "source": "AttributeDefinitions.VISIBLE_FIELDS has 54 entries"
+    },
+    {
+      "name": "position competence count",
+      "group": "player",
+      "value": 14,
+      "unit": "positions",
+      "source": "AttributeDefinitions.POSITION_FIELDS has 14 entries"
+    },
+    {
+      "name": "hidden personality count",
+      "group": "player",
+      "value": 8,
+      "unit": "attributes",
+      "source": "AttributeDefinitions.HIDDEN_DIRECT_FIELDS has 8 entries"
+    },
+    {
+      "name": "plausible block minimum positions",
+      "group": "memory",
+      "value": 12,
+      "unit": "positions >= 1",
+      "source": "PlayerExporter.plausiblePlayerBlock requires 12"
+    },
+    {
+      "name": "plausible block minimum attributes",
+      "group": "memory",
+      "value": 25,
+      "unit": "attributes >= 1",
+      "source": "PlayerExporter.plausiblePlayerBlock requires 25"
+    },
+    {
+      "name": "player staff shift",
+      "group": "memory",
+      "value": 248,
+      "unit": "bytes",
+      "source": "PersonMemoryClassifier.PLAYER_STAFF_SHIFT = 896 - 648"
+    },
+    {
+      "name": "writes go into the game",
+      "group": "editing",
+      "value": true,
+      "source": "livewrite.LiveEditor.write uses WriteProcessMemory and reads the value back"
+    },
+    {
+      "name": "local save used",
+      "group": "editing",
+      "value": false,
+      "source": "db.Snapshot no longer applies saves/edits.json; edits go to the game"
+    },
+    {
+      "name": "injury reference offset",
+      "group": "injury",
+      "value": -400,
+      "unit": "bytes from person",
+      "source": "PlayerRecordLayout.Direct.injuryReferenceRel=-0x190 (FM AI Assistant 2.1.0)"
+    },
+    {
+      "name": "injury type offset",
+      "group": "injury",
+      "value": 8,
+      "unit": "bytes from injury item",
+      "source": "PlayerRecordLayout.Injury.typeRel=0x08"
+    },
+    {
+      "name": "injury type name offset",
+      "group": "injury",
+      "value": 32,
+      "unit": "bytes from type object",
+      "source": "PlayerRecordLayout.Injury.typeNameRel=0x20"
+    },
+    {
+      "name": "injury start day offset",
+      "group": "injury",
+      "value": 32,
+      "unit": "bytes from injury item",
+      "source": "PlayerRecordLayout.Injury.dayRel=0x20"
+    },
+    {
+      "name": "injury start year offset",
+      "group": "injury",
+      "value": 34,
+      "unit": "bytes from injury item",
+      "source": "PlayerRecordLayout.Injury.yearRel=0x22"
+    },
+    {
+      "name": "injury full training offset",
+      "group": "injury",
+      "value": 40,
+      "unit": "bytes from injury item",
+      "source": "PlayerRecordLayout.Injury.fullTrainingRel=0x28"
+    },
+    {
+      "name": "injury light training offset",
+      "group": "injury",
+      "value": 42,
+      "unit": "bytes from injury item",
+      "source": "PlayerRecordLayout.Injury.lightTrainingRel=0x2A"
+    },
+    {
+      "name": "heal clears injury reference",
+      "group": "injury",
+      "value": true,
+      "source": "Presets/Heal.json IsInjured=false; PlayerExporter.injuryStatus reads the reference"
+    },
+    {
+      "name": "assistant default provider",
+      "group": "assistant",
+      "value": "commandcode",
+      "source": "CommandCodeClient.DEFAULT_BASE_URL; application.properties"
+    },
+    {
+      "name": "assistant default base url",
+      "group": "assistant",
+      "value": "https://api.commandcode.ai/provider/v1",
+      "source": "CommandCodeClient.DEFAULT_BASE_URL"
+    },
+    {
+      "name": "assistant default model",
+      "group": "assistant",
+      "value": "deepseek/deepseek-v4.1-flash",
+      "source": "application.properties app.ai.commandcode.default-model"
+    },
+    {
+      "name": "assistant request timeout",
+      "group": "assistant",
+      "value": 180,
+      "unit": "seconds",
+      "source": "CommandCodeClient timeout Duration.ofSeconds(180)"
+    },
+    {
+      "name": "assistant max response bytes",
+      "group": "assistant",
+      "value": 2097152,
+      "unit": "bytes",
+      "source": "CommandCodeClient MAX_RESPONSE_BYTES"
+    },
+    {
+      "name": "assistant max catalog bytes",
+      "group": "assistant",
+      "value": 8388608,
+      "unit": "bytes",
+      "source": "CommandCodeClient MAX_CATALOG_BYTES"
+    },
+    {
+      "name": "assistant key file name",
+      "group": "assistant",
+      "value": "commandcode.key",
+      "source": "CommandCodeKeyStore FILE_NAME"
+    },
+    {
+      "name": "assistant key max stored bytes",
+      "group": "assistant",
+      "value": 65536,
+      "unit": "bytes",
+      "source": "CommandCodeKeyStore MAX_STORED_BYTES"
+    },
+    {
+      "name": "assistant dpapi ui forbidden flag",
+      "group": "assistant",
+      "value": 1,
+      "source": "CommandCodeKeyStore CRYPTPROTECT_UI_FORBIDDEN"
+    },
+    {
+      "name": "tactic slot count",
+      "group": "tactic",
+      "value": 22,
+      "unit": "role records",
+      "source": "TacticShape.SLOT_COUNT (eleven with the ball, eleven without)"
+    },
+    {
+      "name": "tactic role marker",
+      "group": "tactic",
+      "value": "D 00 02",
+      "source": "TacticShape.ROLE_MARKER"
+    },
+    {
+      "name": "tactic header bytes",
+      "group": "tactic",
+      "value": 14,
+      "unit": "bytes",
+      "source": "TacticShape.HEADER_BYTES"
+    },
+    {
+      "name": "tactic option bytes",
+      "group": "tactic",
+      "value": 24,
+      "unit": "bytes",
+      "source": "TacticShape.OPTION_BYTES"
+    },
+    {
+      "name": "tactic post bytes",
+      "group": "tactic",
+      "value": 12,
+      "unit": "bytes",
+      "source": "TacticShape.POST_BYTES"
+    },
+    {
+      "name": "tactic settings bytes",
+      "group": "tactic",
+      "value": 18,
+      "unit": "bytes",
+      "source": "docs/fm27-tactic-files.md section 3"
+    },
+    {
+      "name": "tactic max template bytes",
+      "group": "tactic",
+      "value": 4194304,
+      "unit": "bytes",
+      "source": "TacticFileService MAX_TEMPLATE_BYTES"
+    },
+    {
+      "name": "training sessions per day",
+      "group": "training",
+      "value": 3,
+      "unit": "sessions",
+      "source": "docs/fm27-training-schedules.md section 2 (7 day records)"
+    },
+    {
+      "name": "training day records",
+      "group": "training",
+      "value": 7,
+      "unit": "days",
+      "source": "docs/fm27-training-schedules.md section 2"
+    },
+    {
+      "name": "training rest id",
+      "group": "training",
+      "value": 300,
+      "source": "TrainingActivity REST(300)"
+    },
+    {
+      "name": "training recovery id",
+      "group": "training",
+      "value": 301,
+      "source": "TrainingActivity RECOVERY(301)"
+    },
+    {
+      "name": "training match id",
+      "group": "training",
+      "value": 500,
+      "source": "TrainingActivity MATCH(500)"
+    },
+    {
+      "name": "training team bonding id",
+      "group": "training",
+      "value": 400,
+      "source": "TrainingActivity TEAM_BONDING(400)"
+    },
+    {
+      "name": "training final third id",
+      "group": "training",
+      "value": 102,
+      "source": "TrainingActivity FINAL_THIRD(102)"
+    },
+    {
+      "name": "training pressing intensity id",
+      "group": "training",
+      "value": 5,
+      "source": "TrainingActivity PRESSING_INTENSITY(5)"
+    },
+    {
+      "name": "training pressing traps id",
+      "group": "training",
+      "value": 6,
+      "source": "TrainingActivity PRESSING_TRAPS(6)"
+    },
+    {
+      "name": "training out of possession shape id",
+      "group": "training",
+      "value": 7,
+      "source": "TrainingActivity OUT_OF_POSSESSION_SHAPE(7)"
+    },
+    {
+      "name": "CA share in ratings",
+      "group": "rating",
+      "value": 0.5,
+      "unit": "share",
+      "source": "0x14074042C mov rax,0x3FE0000000000000 and 0x140740436 mov [rbx+0x38],rax; the field is CaSharePercent; english.json CaShare.Help says 'Default: 50%'"
+    },
+    {
+      "name": "role weight group total",
+      "group": "rating",
+      "value": 100,
+      "unit": "percent",
+      "source": "0x140741DE0 requires each of the three group totals to equal 0x64 (100)"
+    },
+    {
+      "name": "role weights field map",
+      "group": "rating",
+      "value": "+0x10 map, +0x18 ladder, +0x20 key, +0x28 preferable, +0x30 avoid, +0x38 CA share",
+      "unit": "offsets",
+      "source": "accessors 0x140740090/0A0 (+0x20), 0x1407400B0/0C0 (+0x28), 0x1407400D0/0E0 (+0x30), 0x1407400F0/100 (+0x18), 0x140740110/120 (+0x38); verified with native_bytes_show at 0x140740090 and native_function_callers_list"
+    },
+    {
+      "name": "role weights default stores",
+      "group": "rating",
+      "value": "16.0 @0x140740455 +0x20; 4.0 @0x1407403FB +0x28; 3.0 @0x140740410 +0x30; 0.5 @0x14074042C +0x38",
+      "unit": "addresses",
+      "source": "native_bytes_show 0x1407403F0 (176 bytes): 48 B9 imm64 + 48 89 4B disp8 for 4.0/3.0/0.5, 48 B8 imm64 + 48 89 43 20 for 16.0"
+    },
+    {
+      "name": "role weights validator",
+      "group": "rating",
+      "value": "0x1407404C0",
+      "unit": "address",
+      "source": "Ghidra slice dump tools/ghidra_out/0x1407404c0.c plus native_function_pseudocode; six conditions (see below)"
+    },
+    {
+      "name": "role weights sum rule",
+      "group": "rating",
+      "value": true,
+      "unit": "bool",
+      "source": "0x1407404C0 compares +0x20 + +0x28 + +0x30 <= 0.0 and returns 0 (reject), so the three weights must sum above zero"
+    },
+    {
+      "name": "role weights negative rule",
+      "group": "rating",
+      "value": true,
+      "unit": "bool",
+      "source": "0x1407404C0 compares +0x20, +0x28 and +0x30 against 0.0 and rejects any negative weight"
+    },
+    {
+      "name": "CA share validated",
+      "group": "rating",
+      "value": false,
+      "unit": "bool",
+      "source": "0x1407404C0 never reads +0x38; an out-of-range CaShare is accepted by the original"
+    },
+    {
+      "name": "avoid weight in the displayed rating",
+      "group": "rating",
+      "value": false,
+      "unit": "bool",
+      "source": "rolesAndDuties.json DutiesAttributes carry only KeyAttribute true/false (no avoid group); 0.5*158/200+0.5*0.76 = 77.49 exactly, so no avoid term acts on the header"
+    },
+    {
+      "name": "role weights loader",
+      "group": "rating",
+      "value": "FMRTE_ROLE_WEIGHTS",
+      "unit": "env var",
+      "source": "ratings.load_role_weights: reads the original's Ratings/rolesAndDuties.json, validates it with the 0x1407404C0 rules, falls back to the compiled defaults"
+    },
+    {
+      "name": "role definitions completeness validator",
+      "group": "rating",
+      "value": "0x1407406C0",
+      "unit": "address",
+      "source": "Ghidra 12.1.4 on a 64 KB .text slice at 0x140740000; 0x1407404C0 calls it before it reads any weight"
+    },
+    {
+      "name": "role table must cover every position",
+      "group": "rating",
+      "value": true,
+      "unit": "bool",
+      "source": "0x1407406C0 walks the position enum and returns 0 when a position has no entry in the +0x10 dictionary"
+    },
+    {
+      "name": "duty attributes must all resolve",
+      "group": "rating",
+      "value": true,
+      "unit": "bool",
+      "source": "0x1407406C0 returns 0 when a duty names an attribute the global attribute dictionary does not resolve"
+    },
+    {
+      "name": "roles dictionary slot",
+      "group": "rating",
+      "value": "+0x10",
+      "unit": "offset",
+      "source": "getter 0x140740070 is 'return [rcx+0x10]'; 0x140740340 stores the builder 0x140741FA0's +0x10 there"
+    },
+    {
+      "name": "penalty ladder is copied per instance",
+      "group": "rating",
+      "value": true,
+      "unit": "bool",
+      "source": "0x140741F50 allocates 0x14 elements and memcpy 0x50 bytes from 0x14517BB38, so each object owns a mutable copy"
+    },
+    {
+      "name": "scout rate model",
+      "group": "rating",
+      "value": "PlayerPositionRate + GeneralPositionRate",
+      "unit": "fields",
+      "source": ".rdata 0x143784769 'PositionRoleAndDutiesRate$PlayerPositionRate&GeneralPositionRate'; 0x143877b51 'GetPlayerPositionRate'"
+    },
+    {
+      "name": "scout rating type names",
+      "group": "rating",
+      "value": "PlayerRating, PositionRoleAndDutiesRate, PositionRoleRates, WeightedAttribute, BestFormationsCalculator",
+      "unit": "names",
+      "source": ".rdata 0x143775823, 0x14377588b, 0x1437758f2, 0x143775616, 0x1437756ea (reflection metadata names)"
+    },
+    {
+      "name": "current date RVA build 2494687",
+      "value": 92054456,
+      "source": "FmOffsets.currentDateRva (fm-ai-assistant)"
+    },
+    {
+      "name": "current date RVA build 2493426",
+      "value": 90895224,
+      "source": "FmOffsets.currentDateRva (fm-ai-assistant)"
+    },
+    {
+      "name": "current date RVA build 2486695",
+      "value": 90887032,
+      "source": "FmOffsets.currentDateRva (fm-ai-assistant)"
+    },
+    {
+      "name": "alternate date RVA build 2494687",
+      "value": 87678224,
+      "source": "FmOffsets.alternateDateRva (fm-ai-assistant)"
+    },
+    {
+      "name": "human manager RVA build 2494687",
+      "value": 92341000,
+      "source": "FmOffsets.currentHumanManagerRva (fm-ai-assistant)"
+    },
+    {
+      "name": "human manager RVA build 2493426",
+      "value": 91181768,
+      "source": "FmOffsets.currentHumanManagerRva (fm-ai-assistant)"
+    },
+    {
+      "name": "human manager RVA build 2486695",
+      "value": 91173576,
+      "source": "FmOffsets.currentHumanManagerRva (fm-ai-assistant)"
+    },
+    {
+      "name": "table RVA Xbox build 2494687",
+      "value": 90717144,
+      "source": "NativeModuleProfile (fm-ai-assistant)"
+    },
+    {
+      "name": "table RVA Steam 26620374",
+      "value": 92780240,
+      "source": "NativeModuleProfile (fm-ai-assistant)"
+    },
+    {
+      "name": "human manager employment offset",
+      "value": 168,
+      "source": "PlayerRecordLayout.Direct.registrationRefRel / ManagedClubMemoryReader.PERSON_EMPLOYMENT_REL"
+    },
+    {
+      "name": "club long name offset",
+      "value": 200,
+      "source": "FmMemoryStrings.clubDisplayName"
+    },
+    {
+      "name": "club short name offset",
+      "value": 192,
+      "source": "FmMemoryStrings.clubDisplayName"
+    }
+  ]
+}
