@@ -1687,22 +1687,154 @@
   }
 
   function renderSimpleMarkdown(text) {
-    const lines = esc(text || "").split("\n");
-    let html = "", inList = false;
-    for (const line of lines) {
-      const m = line.match(/^\s*[-*]\s+(.*)$/);
-      const formatted = (s) => s
+    const raw = String(text || "").replace(/\r\n/g, "\n");
+    if (!raw.trim()) return "<p>(empty)</p>";
+
+    const inline = (s) => {
+      // Inline code first so markdown symbols inside code stay literal
+      const codes = [];
+      let out = esc(s).replace(/`([^`]+)`/g, (_m, inner) => {
+        codes.push(`<code>${inner}</code>`);
+        return `\u0000CODE${codes.length - 1}\u0000`;
+      });
+      out = out
+        .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+          '<a class="md-link" href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
         .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-        .replace(/`([^`]+)`/g, "<code>$1</code>");
-      if (m) {
-        if (!inList) { html += "<ul>"; inList = true; }
-        html += `<li>${formatted(m[1])}</li>`;
-      } else {
-        if (inList) { html += "</ul>"; inList = false; }
-        if (line.trim()) html += `<p style="margin-bottom:5px;">${formatted(line)}</p>`;
+        .replace(/__(.+?)__/g, "<strong>$1</strong>")
+        .replace(/(^|[\s(])\*([^*\n]+?)\*(?=[\s).,!?:;]|$)/g, "$1<em>$2</em>");
+      return out.replace(/\u0000CODE(\d+)\u0000/g, (_m, i) => codes[Number(i)]);
+    };
+
+    const isTableSep = (ln) => /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(ln);
+    const splitRow = (ln) => {
+      let s = ln.trim();
+      if (s.startsWith("|")) s = s.slice(1);
+      if (s.endsWith("|")) s = s.slice(0, -1);
+      return s.split("|").map((c) => c.trim());
+    };
+
+    const lines = raw.split("\n");
+    let html = "";
+    let i = 0;
+
+    while (i < lines.length) {
+      const line = lines[i];
+      const trimmed = line.trim();
+
+      if (!trimmed) { i++; continue; }
+
+      // Fenced code block ```
+      if (trimmed.startsWith("```")) {
+        const buf = [];
+        i++;
+        while (i < lines.length && !lines[i].trim().startsWith("```")) {
+          buf.push(lines[i]);
+          i++;
+        }
+        if (i < lines.length) i++;
+        html += `<pre class="md-pre"><code>${esc(buf.join("\n"))}</code></pre>`;
+        continue;
       }
+
+      // Horizontal rule
+      if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed)) {
+        html += "<hr />";
+        i++;
+        continue;
+      }
+
+      // Headings (#..####)
+      const hm = line.match(/^\s*(#{1,4})\s+(.+?)\s*#*$/);
+      if (hm) {
+        const lvl = hm[1].length;
+        html += `<h${lvl}>${inline(hm[2])}</h${lvl}>`;
+        i++;
+        continue;
+      }
+
+      // GFM Table (header + separator row, tolerating blank lines between rows)
+      if (trimmed.includes("|")) {
+        let sepIdx = i + 1;
+        while (sepIdx < lines.length && !lines[sepIdx].trim()) sepIdx++;
+        if (sepIdx < lines.length && isTableSep(lines[sepIdx])) {
+          const headers = splitRow(line);
+          i = sepIdx + 1;
+          const bodyRows = [];
+          while (i < lines.length) {
+            if (!lines[i].trim()) {
+              // Peek ahead: if next non-empty line is another pipe row, skip blank line
+              let peek = i + 1;
+              while (peek < lines.length && !lines[peek].trim()) peek++;
+              if (peek < lines.length && lines[peek].trim().startsWith("|") && lines[peek].includes("|")) {
+                i = peek;
+                continue;
+              }
+              break;
+            }
+            if (!lines[i].includes("|")) break;
+            bodyRows.push(splitRow(lines[i]));
+            i++;
+          }
+          html += `
+            <div class="md-table-wrap">
+              <table class="md-table">
+                <thead><tr>${headers.map((h) => `<th>${inline(h)}</th>`).join("")}</tr></thead>
+                <tbody>${bodyRows.map((r) => `<tr>${headers.map((_, ci) => `<td>${inline(r[ci] || "")}</td>`).join("")}</tr>`).join("")}</tbody>
+              </table>
+            </div>
+          `;
+          continue;
+        }
+      }
+
+      // Blockquote
+      if (/^\s*>\s?/.test(line)) {
+        const qbuf = [];
+        while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+          qbuf.push(lines[i].replace(/^\s*>\s?/, ""));
+          i++;
+        }
+        html += `<blockquote>${qbuf.map((l) => inline(l)).join("<br />")}</blockquote>`;
+        continue;
+      }
+
+      // Unordered list
+      if (/^\s*[-*•]\s+/.test(line)) {
+        const items = [];
+        while (i < lines.length && /^\s*[-*•]\s+/.test(lines[i])) {
+          items.push(lines[i].replace(/^\s*[-*•]\s+/, ""));
+          i++;
+        }
+        html += `<ul>${items.map((it) => `<li>${inline(it)}</li>`).join("")}</ul>`;
+        continue;
+      }
+
+      // Ordered list
+      if (/^\s*\d+\.\s+/.test(line)) {
+        const items = [];
+        while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
+          items.push(lines[i].replace(/^\s*\d+\.\s+/, ""));
+          i++;
+        }
+        html += `<ol>${items.map((it) => `<li>${inline(it)}</li>`).join("")}</ol>`;
+        continue;
+      }
+
+      // Paragraph
+      const pbuf = [line];
+      i++;
+      while (i < lines.length) {
+        const nxt = lines[i];
+        const nt = nxt.trim();
+        if (!nt || nt.startsWith("```") || /^\s*(#{1,4}\s|[-*•]\s|\d+\.\s|>\s?|(-{3,}|\*{3,})$)/.test(nxt)) break;
+        if (nt.includes("|") && i + 1 < lines.length && isTableSep(lines[i + 1])) break;
+        pbuf.push(nxt);
+        i++;
+      }
+      html += `<p>${pbuf.map((l) => inline(l)).join("<br />")}</p>`;
     }
-    if (inList) html += "</ul>";
+
     return html || "<p>(empty)</p>";
   }
 
@@ -1838,6 +1970,7 @@
             else turn.tools.push({ id: ev.id, name: ev.name, args: ev.args, running: false, ms: ev.ms, ok: ev.ok });
           } else if (ev.type === "done") {
             turn.pending = false;
+            turn.thinkOpen = false;
             turn.text = ev.text || "";
             turn.elapsedMs = ev.elapsed_ms || 0;
             if (ev.status) renderStatus(ev.status);
@@ -1957,6 +2090,76 @@
     }
   }
 
+  async function loadOnlineTactics() {
+    const host = document.getElementById("onlineTacticsContent");
+    if (!host) return;
+    const source = document.getElementById("onlineTacticSource")?.value || "fm-arena";
+    const q = (document.getElementById("onlineTacticQuery")?.value || "").trim();
+    host.innerHTML = `<div class="empty-note">Fetching FM27 tactics from ${esc(source)}…</div>`;
+    try {
+      const data = await apiGet(`/api/tactics/online?source=${encodeURIComponent(source)}&q=${encodeURIComponent(q)}&limit=25`);
+      if (!data.ok) {
+        host.innerHTML = `<div class="empty-note">${esc(data.error || "Failed to fetch tactics.")}</div>`;
+        return;
+      }
+      const list = data.tactics || [];
+      if (!list.length) {
+        host.innerHTML = `<div class="empty-note">No tactics matched "${esc(q)}".</div>`;
+        return;
+      }
+      host.innerHTML = `
+        <div class="modal-note" style="padding:2px 2px 4px;">
+          ${data.total} tactics · Installs to <code>${esc(data.tactics_dir || "FM27/tactics")}</code>
+        </div>
+        ${list.map((t, idx) => `
+          <div class="online-tactic-card">
+            <div class="online-tactic-top">
+              <div class="online-tactic-title">#${t.rank} ${t.crown ? "★ " : ""}${esc(t.name)}</div>
+              <span class="kpi-trend">${esc(t.pts)}</span>
+            </div>
+            <div class="online-tactic-meta">
+              <span class="etag">${esc(t.formation)}</span>
+              <span>by ${esc(t.author)}</span>
+              ${t.xgd ? `<span>xGD ${esc(t.xgd)}</span>` : ""}
+              ${t.gd ? `<span>GD ${esc(t.gd)}</span>` : ""}
+              ${t.downloads ? `<span>${esc(t.downloads)} DLs</span>` : ""}
+            </div>
+            <div class="online-tactic-foot">
+              <a class="dl-pill-link" href="${esc(t.url)}" target="_blank" rel="noopener noreferrer">↗ View Thread</a>
+              ${t.direct_download
+                ? `<button class="dl-pill-btn" data-dl-tactic="${idx}">↓ Install .fmf</button>`
+                : `<span style="font-size:10px;color:var(--muted);">Login required on site</span>`}
+            </div>
+          </div>
+        `).join("")}
+      `;
+      host.querySelectorAll("[data-dl-tactic]").forEach((btn) => {
+        btn.onclick = async () => {
+          const item = list[Number(btn.dataset.dlTactic)];
+          btn.disabled = true;
+          btn.textContent = "Installing…";
+          try {
+            const res = await apiPost("/api/tactics/download", { url: item.url });
+            if (res.ok) {
+              btn.textContent = "✓ Installed";
+              toast(res.message || `Installed ${res.filename}`, "ok");
+            } else {
+              btn.disabled = false;
+              btn.textContent = "↓ Install .fmf";
+              toast(res.error || "Download failed", "error");
+            }
+          } catch (err) {
+            btn.disabled = false;
+            btn.textContent = "↓ Install .fmf";
+            toast(err.message, "error");
+          }
+        };
+      });
+    } catch (err) {
+      host.innerHTML = `<div class="empty-note">${esc(err.message)}</div>`;
+    }
+  }
+
   async function loadTrainingTab() {
     const host = document.getElementById("trainingContent");
     const focus = document.getElementById("trainingFocusSelect").value;
@@ -1964,14 +2167,39 @@
     host.innerHTML = '<div class="empty-note">Building training week…</div>';
     try {
       const week = await apiGet(`/api/plans/training?focus=${encodeURIComponent(focus)}&club=${encodeURIComponent(club)}`);
-      host.innerHTML = (week.days || []).map((d) => `
-        <div class="day-card">
-          <div class="day-head"><span>${esc(d.day)}</span></div>
-          <div class="day-sessions">
-            ${(d.sessions || []).map((s, i) => `<div>${i + 1}. ${esc(s.label || s.name || "")}</div>`).join("")}
-          </div>
+      const local = week.local_schedules || {};
+      const localList = (local.files || []).slice(0, 8);
+      host.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;">
+          <span class="modal-note">S24 evidence-based schedule</span>
+          <button class="mini-btn" id="btnCopyTrainingSheet">Copy Sheet</button>
         </div>
-      `).join("");
+        ${(week.days || []).map((d) => `
+          <div class="day-card">
+            <div class="day-head"><span>${esc(d.day)}</span></div>
+            <div class="day-sessions">
+              ${(d.sessions || []).map((s, i) => `<div>${i + 1}. ${esc(s.label || s.name || "")}</div>`).join("")}
+            </div>
+          </div>
+        `).join("")}
+        ${localList.length ? `
+          <div class="card">
+            <div class="card-head"><span>Local FM27 Schedules (${local.count})</span></div>
+            <div class="card-body">
+              ${localList.map((f) => `<div class="attr-row"><span class="attr-name">${esc(f.name)}</span><span style="font-size:10px;color:var(--muted)">.fmf</span></div>`).join("")}
+            </div>
+          </div>
+        ` : ""}
+      `;
+      const copyBtn = document.getElementById("btnCopyTrainingSheet");
+      if (copyBtn && week.sheet) {
+        copyBtn.onclick = () => {
+          navigator.clipboard?.writeText(week.sheet).then(
+            () => toast("Training sheet copied to clipboard", "ok"),
+            () => toast("Could not access clipboard", "info")
+          );
+        };
+      }
     } catch (err) {
       host.innerHTML = `<div class="empty-note">${esc(err.message)}</div>`;
     }
@@ -2089,10 +2317,10 @@
     if (clearRecentBtn) clearRecentBtn.onclick = clearUnpinnedRecent;
 
     // AI Modes
-    document.querySelectorAll(".ai-mode").forEach((el) => {
+    document.querySelectorAll(".ai-mode[data-aimode]").forEach((el) => {
       el.onclick = () => {
         state.aiMode = el.dataset.aimode;
-        document.querySelectorAll(".ai-mode").forEach((m) => m.classList.toggle("active", m === el));
+        document.querySelectorAll(".ai-mode[data-aimode]").forEach((m) => m.classList.toggle("active", m === el));
         document.getElementById("aiViewChat").classList.toggle("active", state.aiMode === "chat");
         document.getElementById("aiViewTactics").classList.toggle("active", state.aiMode === "tactics");
         document.getElementById("aiViewTraining").classList.toggle("active", state.aiMode === "training");
@@ -2101,8 +2329,23 @@
         if (state.aiMode === "training") loadTrainingTab();
       };
     });
+    document.querySelectorAll(".ai-mode[data-tmode]").forEach((el) => {
+      el.onclick = () => {
+        const mode = el.dataset.tmode;
+        document.querySelectorAll(".ai-mode[data-tmode]").forEach((m) => m.classList.toggle("active", m === el));
+        document.getElementById("tacticBestXiPane").style.display = mode === "bestxi" ? "flex" : "none";
+        document.getElementById("tacticOnlinePane").style.display = mode === "online" ? "flex" : "none";
+        if (mode === "online") loadOnlineTactics();
+      };
+    });
     document.getElementById("btnRebuildTactic").onclick = loadTacticsTab;
     document.getElementById("btnRebuildTraining").onclick = loadTrainingTab;
+    const btnOnline = document.getElementById("btnFetchOnlineTactics");
+    if (btnOnline) btnOnline.onclick = loadOnlineTactics;
+    const onlineQ = document.getElementById("onlineTacticQuery");
+    if (onlineQ) onlineQ.onkeydown = (e) => { if (e.key === "Enter") loadOnlineTactics(); };
+    const onlineSrc = document.getElementById("onlineTacticSource");
+    if (onlineSrc) onlineSrc.onchange = loadOnlineTactics;
 
     // Chat composer + / Command Palette
     const chatInput = document.getElementById("chatInput");

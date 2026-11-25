@@ -416,6 +416,74 @@ class StudioServerTests(unittest.TestCase):
         self.assertIn(fm.table_base - (0x53faca0 - 0x53eb138), mgr_cands[:2])
         self.assertGreaterEqual(FM.MAX_SCAN_SPAN, 0x0A00_0000)
 
+    def test_builtin_tactics_s24_training_and_online_tactic_parser(self) -> None:
+        import os
+        import shutil
+        import tempfile
+        from fmrte import fmplans, fmtools, tacticfiles, tacticweb
+
+        # 1) Built-in templates work with NO external FMRTE_GAME_DIR
+        with mock.patch.object(tacticfiles, "game_data_directory", return_value=""):
+            built = fmplans.build_tactic_from_squad(self.db, "Milan", template_name="4-2-3-1", style="Balanced")
+            self.assertNotIn("error", built)
+            self.assertEqual(len(built["roles"]), 11)
+            self.assertIn("4-2-3-1", built["template"])
+            auto_built = fmplans.build_tactic_from_squad(self.db, "Milan", template_name="", style="Balanced")
+            self.assertNotIn("error", auto_built)
+            self.assertEqual(len(auto_built["roles"]), 11)
+
+        # 2) Pressing training schedule follows Match Lab S24 (no wasted 4/6 slots)
+        press_week = fmplans.training_week("Pressing", match_day="Saturday")
+        ids = {s["id"] for d in press_week["days"] for s in d["sessions"]}
+        self.assertTrue({2, 5, 7}.issubset(ids))
+        self.assertNotIn(4, ids)
+        self.assertNotIn(6, ids)
+
+        # 3) FM-Arena & Sortitoutsi HTML parsers + safe .fmf installer
+        sample_arena = (
+            '<tr id="fmt-tactic-2227">'
+            '<td><span class="fmtCrown"></span><a href="/threads/test-tactic.336/">Test 4-2-3-1</a></td>'
+            '<td><div title="In possession: GK, DL, DCL, DCR, DR, DMCL, DMCR, AML, AMC, AMR, STC"></div></td>'
+            '<td>alice</td><td>1,000</td><td>78 / 114</td><td>+40</td><td>90</td><td>50</td>'
+            '<td>80</td><td>45</td><td>+35</td></tr>'
+        )
+        parsed_arena = tacticweb.parse_fm_arena_html(sample_arena)
+        self.assertEqual(len(parsed_arena), 1)
+        self.assertEqual(parsed_arena[0]["name"], "Test 4-2-3-1")
+        self.assertEqual(parsed_arena[0]["formation"], "4-2-3-1")
+        self.assertTrue(parsed_arena[0]["direct_download"])
+
+        sample_sorti = (
+            '<tr><th><a href="https://sortitoutsi.net/content/78712/meta-4-2-3-1">Meta 4-2-3-1</a>'
+            '<div>By <a href="#">bob</a> 1,200 Downloads</div></th>'
+            '<td>2</td><td>71%</td><td>2.35</td><td>80</td><td>30</td><td>+50</td></tr>'
+        )
+        parsed_sorti = tacticweb.parse_sortitoutsi_html(sample_sorti)
+        self.assertEqual(len(parsed_sorti), 1)
+        self.assertEqual(parsed_sorti[0]["formation"], "4-2-3-1")
+        self.assertFalse(parsed_sorti[0]["direct_download"])
+
+        # 4) Mocked download saves valid .fmf binary to target folder
+        fake_fmf = b"\x02\x01afe.\x08\x00" + b"\x00" * 64
+        tmp_dir = tempfile.mkdtemp(prefix="fm27_tactic_dl_")
+        try:
+            def fake_get(url, **_kw):
+                if "/attachments/" in url:
+                    return fake_fmf, {"content-disposition": 'attachment; filename="Meta 4231.fmf"'}
+                return b'<a href="/attachments/meta-4231-fmf.999/">dl</a>', {}
+
+            with mock.patch.object(tacticweb, "_http_get", side_effect=fake_get):
+                dl = tacticweb.download_fm_arena_tactic("https://fm-arena.com/threads/meta.1/", target_dir=tmp_dir)
+            self.assertTrue(dl["ok"], dl)
+            self.assertTrue(dl["valid_fmf_header"])
+            self.assertTrue(os.path.isfile(dl["path"]))
+            # AI tool schema exposes online tactic tools
+            tool_names = {t["function"]["name"] for t in fmtools.tool_definitions()}
+            self.assertIn("fm27_search_online_tactics", tool_names)
+            self.assertIn("fm27_download_tactic", tool_names)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
     def test_search_transfers_retirements_and_plans(self) -> None:
         for scope in ("players", "clubs", "staff", "nations"):
             code, res = _http_json(f"{self.base}/api/search?scope={scope}&limit=10", token=self.token)

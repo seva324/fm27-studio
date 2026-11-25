@@ -310,22 +310,51 @@ def build_tactic_from_squad(db: Any, club: str, template_name: str = "",
     squad = squad_rows(db, club, 300)
     if not squad:
         return {"error": f"no players are stored for {club}"}
-    templates: dict[str, dict[str, Any]] = {}
+    templates: list[dict[str, Any]] = []
     try:
-        for template in tacticfiles.load_templates():
-            templates[template["name"]] = template
-            templates[template["file"]] = template
-    except Exception:  # noqa: BLE001 - no readable folder means no template
-        templates = {}
-    chosen = templates.get(template_name) if template_name else None
+        templates = list(tacticfiles.load_templates())
+    except Exception:  # noqa: BLE001 - no readable folder means fall back to built-in shapes
+        templates = []
+    if not templates:
+        templates = [
+            {"file": b["file"], "name": b["name"], "positions": list(b["positions"])}
+            for b in tacticfiles.BUILTIN_TEMPLATES
+        ]
+
+    chosen: dict[str, Any] | None = None
+    if template_name:
+        wanted = template_name.strip().lower()
+        for t in templates:
+            if t["name"].lower() == wanted or t["file"].lower() == wanted:
+                chosen = t
+                break
+        if chosen is None:
+            # Fuzzy prefix/substring match (e.g. "4-2-3-1" -> "4-2-3-1 DM AM Wide")
+            for t in templates:
+                if wanted in t["name"].lower() or wanted in t["file"].lower():
+                    chosen = t
+                    break
     if chosen is None and templates:
-        # A stable default: the first template in file order, so two runs of the
-        # same question produce the same shape.
-        chosen = sorted({id(value): value for value in templates.values()}.values(),
-                        key=lambda row: row["file"])[0]
+        # Pick the template that fits this squad best (highest lineup score,
+        # deterministic tie-break on file order).
+        ordered = sorted(templates, key=lambda row: row["file"])
+        if len(ordered) == 1:
+            chosen = ordered[0]
+        else:
+            best_score = -1.0
+            for cand in ordered[:8]:
+                trial = optimize_lineup(
+                    squad, list(cand["positions"]),
+                    Constraints(minimum_position_score=minimum_position_score))
+                unfilled = len(trial.get("unfilled_slots") or [])
+                score = float(trial.get("team_score") or 0.0) - unfilled * 5000.0
+                if score > best_score:
+                    best_score = score
+                    chosen = cand
+        if chosen is None:
+            chosen = ordered[0]
     if chosen is None:
-        return {"error": "no tactic template was found; set FMRTE_GAME_DIR to the "
-                         "folder that holds Tactics/*.json"}
+        return {"error": "no tactic template was found"}
     positions = list(chosen["positions"])
     lineup = optimize_lineup(squad, positions, Constraints(
         minimum_position_score=minimum_position_score))
@@ -557,13 +586,17 @@ def training_week(focus: str, name: str = "",
         notes = ["Recovery days use 301; rest days use 300.",
                  "No tactical work, so sharpness falls slowly rather than fast."]
     elif "press" in lowered or "defens" in lowered:
-        week = [[5, 6, 7], [4, 7, 301], [5, 6, 7], [4, 5, 301],
-                [6, 7, 102], [101, 102, 301], [300, 300, 300]]
-        notes = ["Pressing intensity (5) and pressing traps (6) are the two "
-                 "sessions that raise the press.",
-                 "Out-of-possession shape (7) is what makes the press hold.",
-                 "The measured evidence says a non-standard pressing trap costs "
-                 "points, so use 6 to train the shape rather than to change it."]
+        # Aligned with Match Lab S24: prioritize proven high-impact areas
+        # (Chance creation 2, Pressing intensity 5, Out-of-possession shape 7)
+        # instead of Engagement line (4) / Pressing traps (6) which measured no effect.
+        week = [[5, 7, 2], [5, 7, 301], [2, 5, 7], [5, 7, 301],
+                [102, 2, 301], [101, 102, 301], [300, 300, 300]]
+        notes = ["Pressing intensity (5), out-of-possession shape (7) and chance "
+                 "creation (2) are the three familiarity areas with measured point gains (S24).",
+                 "Engagement line (4) and pressing traps (6) are omitted because "
+                 "paired testing measured no effect from training them.",
+                 "Familiarity gains saturate near 50 — rotate to recovery (301) or "
+                 "match prep (101/102) once those areas are built."]
     elif "attack" in lowered or "chance" in lowered or "final third" in lowered:
         week = [[2, 102, 201], [1, 2, 301], [2, 102, 203], [1, 2, 301],
                 [102, 201, 203], [101, 102, 301], [300, 300, 300]]

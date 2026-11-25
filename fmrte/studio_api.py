@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from . import assistant as A
-from . import fmplans, fmtools, ratings, spec
+from . import fmplans, fmtools, ratings, spec, tacticweb
 from .db import DATE_COLUMNS, SQUAD_COLUMNS, Snapshot
 
 DEFAULT_CLUB = "Milan"
@@ -870,7 +870,22 @@ class StudioBackend:
     def training_plan(self, focus: str = "Balanced", club_name: str = "") -> dict[str, Any]:
         club = (club_name or "").strip() or self.status_payload()["managed_club_raw"]
         week = fmplans.training_week(focus or "Balanced", f"{Snapshot.display_club(club)} — {focus or 'Balanced'}")
+        week["local_schedules"] = tacticweb.list_local_fmf("schedules")
         return week
+
+    def online_tactics(self, *, source: str = "fm-arena", query: str = "",
+                       formation: str = "", limit: int = 25) -> dict[str, Any]:
+        return tacticweb.search_online_tactics(
+            source=source, query=query, formation=formation, limit=limit)
+
+    def download_tactic(self, url: str) -> dict[str, Any]:
+        return tacticweb.download_fm_arena_tactic(url)
+
+    def local_tactics_and_schedules(self) -> dict[str, Any]:
+        return {
+            "tactics": tacticweb.list_local_fmf("tactics"),
+            "schedules": tacticweb.list_local_fmf("schedules"),
+        }
 
     # -- AI settings & chat -----------------------------------------------
     def ai_settings_payload(self) -> dict[str, Any]:
@@ -1199,6 +1214,15 @@ def _make_handler(backend: StudioBackend, token: str):
                 self._send_json(backend.tactic_plan(q1("club", ""), q1("style", "Balanced")))
             elif path == "/api/plans/training":
                 self._send_json(backend.training_plan(q1("focus", "Balanced"), q1("club", "")))
+            elif path == "/api/tactics/online":
+                self._send_json(backend.online_tactics(
+                    source=q1("source", "fm-arena"),
+                    query=q1("q", ""),
+                    formation=q1("formation", ""),
+                    limit=_opt_int(q1("limit")) or 25,
+                ))
+            elif path == "/api/tactics/local":
+                self._send_json(backend.local_tactics_and_schedules())
             elif path == "/api/ai/settings":
                 self._send_json(backend.ai_settings_payload())
             elif path.startswith("/api/player/"):
@@ -1301,6 +1325,8 @@ def _make_handler(backend: StudioBackend, token: str):
                 ))
             elif path == "/api/ai/clear":
                 self._send_json(backend.clear_chat())
+            elif path == "/api/tactics/download":
+                self._send_json(backend.download_tactic(str(body.get("url") or "")))
             elif path == "/api/ai/chat":
                 self._stream_ai_chat(body)
             elif path.startswith("/api/player/"):

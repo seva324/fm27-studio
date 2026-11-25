@@ -21,6 +21,98 @@ from typing import Any
 # memory (TacticFileService.MAX_TEMPLATE_BYTES).
 MAX_TEMPLATE_BYTES = 4194304
 
+# Built-in canonical FM27 formation templates so tactic generation ALWAYS works
+# out of the box without requiring an external ``FMRTE_GAME_DIR/Tactics/*.json``
+# folder.  Any user-installed Tactics/*.json files are merged on top.
+BUILTIN_TEMPLATES: tuple[dict[str, Any], ...] = (
+    {
+        "file": "builtin-4-2-3-1-dm-am-wide.json",
+        "name": "4-2-3-1 DM AM Wide",
+        "positions": [
+            "Goalkeeper",
+            "DefenderLeft", "DefenderCentral", "DefenderCentral", "DefenderRight",
+            "DefensiveMidfielder", "DefensiveMidfielder",
+            "AttackingMidfielderLeft", "AttackingMidfielderCentral", "AttackingMidfielderRight",
+            "Striker",
+        ],
+    },
+    {
+        "file": "builtin-4-3-3-dm-wide.json",
+        "name": "4-3-3 DM Wide",
+        "positions": [
+            "Goalkeeper",
+            "DefenderLeft", "DefenderCentral", "DefenderCentral", "DefenderRight",
+            "DefensiveMidfielder", "MidfielderCentral", "MidfielderCentral",
+            "AttackingMidfielderLeft", "AttackingMidfielderRight",
+            "Striker",
+        ],
+    },
+    {
+        "file": "builtin-4-4-2.json",
+        "name": "4-4-2",
+        "positions": [
+            "Goalkeeper",
+            "DefenderLeft", "DefenderCentral", "DefenderCentral", "DefenderRight",
+            "MidfielderLeft", "MidfielderCentral", "MidfielderCentral", "MidfielderRight",
+            "Striker", "Striker",
+        ],
+    },
+    {
+        "file": "builtin-3-4-2-1-dm-am.json",
+        "name": "3-4-2-1 DM AM",
+        "positions": [
+            "Goalkeeper",
+            "DefenderCentral", "DefenderCentral", "DefenderCentral",
+            "WingBackLeft", "DefensiveMidfielder", "DefensiveMidfielder", "WingBackRight",
+            "AttackingMidfielderCentral", "AttackingMidfielderCentral",
+            "Striker",
+        ],
+    },
+    {
+        "file": "builtin-3-5-2-dm-wb.json",
+        "name": "3-5-2 DM WB",
+        "positions": [
+            "Goalkeeper",
+            "DefenderCentral", "DefenderCentral", "DefenderCentral",
+            "WingBackLeft", "DefensiveMidfielder", "MidfielderCentral", "MidfielderCentral", "WingBackRight",
+            "Striker", "Striker",
+        ],
+    },
+    {
+        "file": "builtin-4-2-4-wide.json",
+        "name": "4-2-4 Wide",
+        "positions": [
+            "Goalkeeper",
+            "DefenderLeft", "DefenderCentral", "DefenderCentral", "DefenderRight",
+            "DefensiveMidfielder", "DefensiveMidfielder",
+            "AttackingMidfielderLeft", "AttackingMidfielderRight",
+            "Striker", "Striker",
+        ],
+    },
+    {
+        "file": "builtin-4-1-2-1-2-diamond.json",
+        "name": "4-1-2-1-2 Diamond Narrow",
+        "positions": [
+            "Goalkeeper",
+            "DefenderLeft", "DefenderCentral", "DefenderCentral", "DefenderRight",
+            "DefensiveMidfielder", "MidfielderCentral", "MidfielderCentral",
+            "AttackingMidfielderCentral",
+            "Striker", "Striker",
+        ],
+    },
+    {
+        "file": "builtin-5-2-3-dm-wide.json",
+        "name": "5-2-3 DM Wide",
+        "positions": [
+            "Goalkeeper",
+            "WingBackLeft", "DefenderCentral", "DefenderCentral", "DefenderCentral", "WingBackRight",
+            "DefensiveMidfielder", "DefensiveMidfielder",
+            "AttackingMidfielderLeft", "AttackingMidfielderRight",
+            "Striker",
+        ],
+    },
+)
+
 
 def tactic_templates(directory: str) -> list[dict[str, Any]]:
     """Read the game's own tactic templates: a name and eleven positions."""
@@ -74,8 +166,18 @@ def game_data_directory() -> str:
 
 
 def load_templates() -> list[dict[str, Any]]:
-    """The templates of the game this app can see, or none."""
+    """Tactic templates from disk (when available) merged with built-in FM27 shapes."""
+    disk: list[dict[str, Any]] = []
     directory = game_data_directory()
-    if not directory:
-        return []
-    return tactic_templates(os.path.join(directory, "Tactics"))
+    if directory:
+        disk = tactic_templates(os.path.join(directory, "Tactics"))
+    seen = {t["name"].lower() for t in disk}
+    merged = list(disk)
+    for builtin in BUILTIN_TEMPLATES:
+        if builtin["name"].lower() not in seen:
+            merged.append({
+                "file": builtin["file"],
+                "name": builtin["name"],
+                "positions": list(builtin["positions"]),
+            })
+    return merged

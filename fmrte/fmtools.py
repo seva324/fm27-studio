@@ -433,6 +433,33 @@ def tool_specs() -> list[dict[str, Any]]:
                 }),
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "fm27_search_online_tactics",
+                "description": (
+                    "Search ranked FM27 community tactics from FM-Arena (Patch 27.1.1, "
+                    "direct .fmf download supported) or Sortitoutsi."),
+                "parameters": _schema({
+                    "source": _string("'fm-arena' (default) or 'sortitoutsi'"),
+                    "query": _string("Keyword filter on tactic name or author"),
+                    "formation": _string("Formation filter, e.g. '4-2-3-1' or '3-4-2-1'"),
+                    "limit": _integer("Maximum tactics to return, default 10"),
+                }),
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "fm27_download_tactic",
+                "description": (
+                    "Download a public .fmf tactic file from an FM-Arena thread URL "
+                    "directly into the user's Football Manager 27 tactics folder."),
+                "parameters": _schema({
+                    "url": _string("FM-Arena thread URL returned by fm27_search_online_tactics"),
+                }, ("url",)),
+            },
+        },
     ]
 
 
@@ -575,6 +602,17 @@ def execute_tool(db: Any, name: str, arguments: dict[str, Any],
             return management_priorities()
         if tool == "fm27_fixtures":
             return fixtures(db, club() or default_club, as_int(args.get("limit"), 8))
+        if tool == "fm27_search_online_tactics":
+            from . import tacticweb
+            return tacticweb.search_online_tactics(
+                source=str(args.get("source") or "fm-arena"),
+                query=str(args.get("query") or ""),
+                formation=str(args.get("formation") or ""),
+                limit=as_int(args.get("limit"), 10),
+            )
+        if tool == "fm27_download_tactic":
+            from . import tacticweb
+            return tacticweb.download_fm_arena_tactic(str(args.get("url") or ""))
     except Exception as exc:  # noqa: BLE001 - a tool must never break a turn
         return {"error": f"{tool} failed: {type(exc).__name__}: {exc}"}
     return {"error": f"{tool} is not a tool this build provides"}

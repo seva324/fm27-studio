@@ -155,19 +155,41 @@
 
         <!-- TACTICS TAB -->
         <div class="ai-panel-view" id="aiViewTactics">
-          <div class="plan-controls">
-            <select id="tacticStyleSelect" class="mini-select">
-              <option value="Balanced">Balanced</option>
-              <option value="Gegenpress">Gegenpress</option>
-              <option value="Tiki-Taka">Tiki-Taka</option>
-              <option value="Fluid Counter-Attack">Counter-Attack</option>
-              <option value="Direct Counter-Attack">Direct</option>
-              <option value="Wing Play">Wing Play</option>
-            </select>
-            <button class="mini-btn magnetic" id="btnRebuildTactic">Build Best XI</button>
+          <div class="ai-seg" style="margin-bottom:2px;">
+            <div class="ai-mode active" data-tmode="bestxi">Squad Best XI</div>
+            <div class="ai-mode" data-tmode="online">Online Meta (.fmf)</div>
           </div>
-          <div id="tacticsContent" class="plan-host">
-            <div class="empty-note">Switch to Tactics to compute squad Best XI.</div>
+
+          <div id="tacticBestXiPane" style="display:flex;flex-direction:column;gap:8px;">
+            <div class="plan-controls">
+              <select id="tacticStyleSelect" class="mini-select">
+                <option value="Balanced">Balanced</option>
+                <option value="Pressing">Pressing</option>
+                <option value="Attacking">Attacking</option>
+                <option value="Counter">Counter-Attack</option>
+                <option value="Defensive">Defensive</option>
+              </select>
+              <button class="mini-btn magnetic" id="btnRebuildTactic">Build Best XI</button>
+            </div>
+            <div id="tacticsContent" class="plan-host">
+              <div class="empty-note">Switch to Tactics to compute squad Best XI.</div>
+            </div>
+          </div>
+
+          <div id="tacticOnlinePane" style="display:none;flex-direction:column;gap:8px;">
+            <div class="plan-controls">
+              <select id="onlineTacticSource" class="mini-select">
+                <option value="fm-arena">FM-Arena (27.1.1 · .fmf ↓)</option>
+                <option value="sortitoutsi">Sortitoutsi FM27</option>
+              </select>
+              <button class="mini-btn magnetic" id="btnFetchOnlineTactics">Search</button>
+            </div>
+            <div class="plan-controls">
+              <input id="onlineTacticQuery" class="filter-input" style="flex:1;height:29px;" placeholder="Filter name or formation (e.g. 4-2-3-1, 3-4-3)…" />
+            </div>
+            <div id="onlineTacticsContent" class="plan-host">
+              <div class="empty-note">Click Search to browse FM-Arena &amp; Sortitoutsi FM27 tactics.</div>
+            </div>
           </div>
         </div>
 
