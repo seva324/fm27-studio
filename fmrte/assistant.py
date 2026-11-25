@@ -468,27 +468,50 @@ def _http_chat(settings: AssistantSettings, key: str,
         "temperature": settings.temperature,
         "stream": False,
     }
+    effort = (settings.reasoning or "").strip().lower()
+    if effort in ("low", "medium", "high"):
+        payload_dict["reasoning_effort"] = effort
     if tools:
         payload_dict["tools"] = tools
         payload_dict["tool_choice"] = "auto"
-    body = json.dumps(payload_dict, ensure_ascii=False).encode("utf-8")
-    request = urllib.request.Request(
-        _endpoint(settings.base_url), data=body, method="POST",
-        headers={"Authorization": f"Bearer {key}",
-                 "Content-Type": "application/json",
-                 "Accept": "application/json",
-                 "User-Agent": "FM27-Studio/1.0"})
-    try:
+
+    def _send_once(body_dict: dict[str, Any]) -> bytes:
+        body = json.dumps(body_dict, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(
+            _endpoint(settings.base_url), data=body, method="POST",
+            headers={"Authorization": f"Bearer {key}",
+                     "Content-Type": "application/json",
+                     "Accept": "application/json",
+                     "User-Agent": "FM27-Studio/1.0"})
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read(MAX_RESPONSE_BYTES + 1)
+            return response.read(MAX_RESPONSE_BYTES + 1)
+
+    try:
+        raw = _send_once(payload_dict)
     except urllib.error.HTTPError as exc:
         detail = ""
         try:
             detail = exc.read(1024).decode("utf-8", "replace")
         except Exception:
             pass
-        raise AssistantError(_status_message(exc.code), detail[:200],
-                             status=exc.code) from exc
+        # Graceful fallback if a model/gateway rejects reasoning_effort
+        if ("reasoning_effort" in payload_dict and exc.code in (400, 422)
+                and "reasoning" in detail.lower()):
+            retry_dict = dict(payload_dict)
+            retry_dict.pop("reasoning_effort", None)
+            try:
+                raw = _send_once(retry_dict)
+            except urllib.error.HTTPError as exc2:
+                d2 = ""
+                try:
+                    d2 = exc2.read(1024).decode("utf-8", "replace")
+                except Exception:
+                    pass
+                raise AssistantError(_status_message(exc2.code), d2[:200],
+                                     status=exc2.code) from exc2
+        else:
+            raise AssistantError(_status_message(exc.code), detail[:200],
+                                 status=exc.code) from exc
     except urllib.error.URLError as exc:
         raise AssistantError(
             "The provider could not be reached. Check the connection.",
@@ -579,6 +602,7 @@ def chat_with_tools(settings: AssistantSettings, key: str, db,
                     club_name: str = "",
                     on_status: Callable[[str], None] | None = None,
                     on_event: Callable[[dict[str, Any]], None] | None = None,
+                    user_images: list[dict[str, str]] | None = None,
                     timeout: float = REQUEST_TIMEOUT_SECONDS) -> str:
     """Run an FM AI Assistant tool-calling conversation turn against FMRTE data.
 
@@ -621,8 +645,14 @@ def chat_with_tools(settings: AssistantSettings, key: str, db,
         f"{save_context(db, club_name=active_club)}\n\n"
         "You have FM27 tools to query live/snapshot players, clubs, staff, "
         "fixtures, lineup optimization, squad-based tactic planning, training "
-        "schedules, transfer shortlists, replacements, and Match Lab studies. "
-        "Use tools instead of guessing. Keep tool results concise."
+        "schedules, transfer shortlists, replacements, Match Lab studies, "
+        "online FM-Arena/Sortitoutsi tactics, AND the native FM27 Tactics Lab "
+        "match engine (fm27_lab_status, fm27_lab_inspect_fmf, fm27_lab_load_save, "
+        "fm27_lab_run_ab_test, fm27_lab_jobs). "
+        "Use tools instead of guessing. Keep tool results concise. "
+        "When reporting native match-engine tests, always state verified match count "
+        "and validation_scope honestly; if fm27_lab_status shows installed=false, ask "
+        "the user whether they want to download https://github.com/seva324/fm-tactics-lab."
     )
     emit({"type": "step", "stage": "context", "label": f"Loaded context ({active_club})",
           "ms": int((time.perf_counter() - t_ctx) * 1000)})
@@ -640,7 +670,15 @@ def chat_with_tools(settings: AssistantSettings, key: str, db,
         # the message it is asking about, then builds its history): one user
         # turn, not two.
         messages.pop()
-    messages.append({"role": "user", "content": user_message})
+    if user_images:
+        parts: list[dict[str, Any]] = [{"type": "text", "text": user_message or "Please inspect the attached image(s)."}]
+        for img in user_images[:4]:
+            url = str(img.get("data_url") or "").strip()
+            if url.startswith("data:image/"):
+                parts.append({"type": "image_url", "image_url": {"url": url}})
+        messages.append({"role": "user", "content": parts})
+    else:
+        messages.append({"role": "user", "content": user_message})
 
     tools = fmtools.tool_definitions()
     total_calls = 0

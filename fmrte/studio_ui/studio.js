@@ -35,7 +35,11 @@
     transferState: { mode: "listed", q: "" },
     retireState: { kind: "players", min_age: 35, q: "" },
     sortState: {},        // tableId -> { col, asc }
-    chatTurns: [],        // [{ role, text, steps, thinking, tools, error }]
+    chatTurns: [],        // [{ role, text, attachments, steps, thinking, tools, error }]
+    pendingAttachments: [],
+    fetchedModels: [],
+    labStatus: null,
+    labPollTimer: null,
   };
 
   // ---- HTTP Helpers ----
@@ -1861,7 +1865,11 @@
 
     host.innerHTML = state.chatTurns.map((t, idx) => {
       if (t.role === "user") {
-        return `<div class="msg-user">${esc(t.text)}</div>`;
+        const imgs = (t.attachments || []).filter((a) => a.kind === "image" && a.data_url);
+        const files = (t.attachments || []).filter((a) => a.kind !== "image");
+        const imgHTML = imgs.length ? `<div class="msg-user-imgs">${imgs.map((a) => `<img src="${a.data_url}" alt="${esc(a.name)}" />`).join("")}</div>` : "";
+        const fileHTML = files.length ? `<div class="msg-user-files">${files.map((a) => `<span class="msg-user-file-tag">📎 ${esc(a.name)}</span>`).join("")}</div>` : "";
+        return `<div class="msg-user">${esc(t.text || (imgs.length ? "[Image]" : "[Attachment]"))}${imgHTML}${fileHTML}</div>`;
       }
       const totalToolMs = (t.tools || []).reduce((acc, x) => acc + (x.ms || 0), 0);
       const totalSec = t.elapsedMs ? `${(t.elapsedMs / 1000).toFixed(1)}s` : (t.pending ? "Thinking…" : "Done");
@@ -1924,17 +1932,121 @@
     aiBody.scrollTop = aiBody.scrollHeight;
   }
 
+  function renderAttachmentStrip() {
+    const strip = document.getElementById("chatAttachStrip");
+    if (!strip) return;
+    if (!state.pendingAttachments.length) {
+      strip.style.display = "none";
+      strip.innerHTML = "";
+      return;
+    }
+    strip.style.display = "flex";
+    strip.innerHTML = state.pendingAttachments.map((a, idx) => `
+      <span class="attach-chip" title="${esc(a.name)}">
+        ${a.kind === "image" && a.data_url ? `<img src="${a.data_url}" alt="" />` : `<span>${a.kind === "fmf" ? "⚽" : "📄"}</span>`}
+        <span class="aname">${esc(a.name)}</span>
+        <button class="arm" data-rm-att="${idx}" title="Remove">×</button>
+      </span>
+    `).join("");
+    strip.querySelectorAll("[data-rm-att]").forEach((btn) => {
+      btn.onclick = () => {
+        state.pendingAttachments.splice(Number(btn.dataset.rmAtt), 1);
+        renderAttachmentStrip();
+      };
+    });
+  }
+
+  function addFilesAsAttachments(fileList) {
+    const files = Array.from(fileList || []);
+    for (const file of files) {
+      if (state.pendingAttachments.length >= 6) {
+        toast("Maximum 6 attachments per message", "info");
+        break;
+      }
+      if (file.size > 8 * 1024 * 1024) {
+        toast(`${file.name} exceeds 8 MB limit`, "error");
+        continue;
+      }
+      const lower = (file.name || "").toLowerCase();
+      if ((file.type || "").startsWith("image/") || /\.(png|jpe?g|webp|gif)$/.test(lower)) {
+        const reader = new FileReader();
+        reader.onload = () => {
+          state.pendingAttachments.push({
+            kind: "image",
+            name: file.name || "screenshot.png",
+            mime: file.type || "image/png",
+            data_url: String(reader.result || ""),
+          });
+          renderAttachmentStrip();
+        };
+        reader.readAsDataURL(file);
+      } else if (lower.endsWith(".fmf")) {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const res = String(reader.result || "");
+          const b64 = res.includes(",") ? res.split(",", 2)[1] : res;
+          state.pendingAttachments.push({
+            kind: "fmf",
+            name: file.name,
+            mime: "application/octet-stream",
+            base64: b64,
+          });
+          renderAttachmentStrip();
+        };
+        reader.readAsDataURL(file);
+      } else {
+        const reader = new FileReader();
+        reader.onload = () => {
+          state.pendingAttachments.push({
+            kind: "text",
+            name: file.name,
+            mime: file.type || "text/plain",
+            text: String(reader.result || "").slice(0, 24000),
+          });
+          renderAttachmentStrip();
+        };
+        reader.readAsText(file);
+      }
+    }
+  }
+
+  function syncComposerControls(ai) {
+    if (!ai) return;
+    const mSel = document.getElementById("composerModelSelect");
+    const rSel = document.getElementById("composerReasoningSelect");
+    if (rSel && ai.reasoning) rSel.value = ai.reasoning;
+    if (mSel) {
+      const ids = [];
+      const cur = (ai.model || "").trim();
+      if (cur) ids.push(cur);
+      for (const m of state.fetchedModels) {
+        const id = typeof m === "string" ? m : m.id;
+        if (id && !ids.includes(id)) ids.push(id);
+      }
+      const prov = (ai.providers || []).find((p) => p.id === ai.provider);
+      if (prov && prov.default_model && !ids.includes(prov.default_model)) {
+        ids.push(prov.default_model);
+      }
+      mSel.innerHTML = ids.map((id) => `<option value="${esc(id)}" ${id === cur ? "selected" : ""}>${esc(id)}</option>`).join("");
+    }
+  }
+
   async function sendChat(overrideText = null) {
     if (state.aiBusy) return;
     const input = document.getElementById("chatInput");
     const prompt = (overrideText !== null ? overrideText : input.value).trim();
-    if (!prompt) return;
+    const attachments = overrideText !== null ? [] : state.pendingAttachments.slice();
+    if (!prompt && !attachments.length) return;
     input.value = "";
+    if (overrideText === null) {
+      state.pendingAttachments = [];
+      renderAttachmentStrip();
+    }
     closeCmdPalette();
 
     state.aiBusy = true;
     document.getElementById("btnSend").disabled = true;
-    state.chatTurns.push({ role: "user", text: prompt });
+    state.chatTurns.push({ role: "user", text: prompt, attachments });
     const turn = { role: "assistant", text: "", steps: [], thinking: "", tools: [], pending: true, thinkOpen: true, toolsOpen: false };
     state.chatTurns.push(turn);
     renderChatThread();
@@ -1943,7 +2055,7 @@
       const res = await fetch("/api/ai/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Studio-Token": TOKEN },
-        body: JSON.stringify({ prompt, context: activeContextPayload() }),
+        body: JSON.stringify({ prompt, context: activeContextPayload(), attachments }),
       });
       const reader = res.body.getReader();
       const dec = new TextDecoder();
@@ -2125,14 +2237,28 @@
               ${t.downloads ? `<span>${esc(t.downloads)} DLs</span>` : ""}
             </div>
             <div class="online-tactic-foot">
-              <a class="dl-pill-link" href="${esc(t.url)}" target="_blank" rel="noopener noreferrer">↗ View Thread</a>
-              ${t.direct_download
-                ? `<button class="dl-pill-btn" data-dl-tactic="${idx}">↓ Install .fmf</button>`
-                : `<span style="font-size:10px;color:var(--muted);">Login required on site</span>`}
+              <a class="dl-pill-link" href="${esc(t.url)}" target="_blank" rel="noopener noreferrer">↗ View</a>
+              <div style="display:flex;gap:5px;">
+                ${t.direct_download
+                  ? `<button class="dl-pill-link" data-lab-tactic="${idx}" title="Load into Lab as Tactic B">⚗ Lab</button>
+                     <button class="dl-pill-btn" data-dl-tactic="${idx}">↓ Install .fmf</button>`
+                  : `<span style="font-size:10px;color:var(--muted);">Login on site</span>`}
+              </div>
             </div>
           </div>
         `).join("")}
       `;
+      host.querySelectorAll("[data-lab-tactic]").forEach((btn) => {
+        btn.onclick = () => {
+          const item = list[Number(btn.dataset.labTactic)];
+          document.querySelector('.ai-mode[data-aimode="lab"]')?.click();
+          const bKind = document.getElementById("labTacticBKind");
+          const bUrl = document.getElementById("labTacticBUrl");
+          if (bKind) { bKind.value = "fm_arena"; bKind.dispatchEvent(new Event("change")); }
+          if (bUrl) bUrl.value = item.url;
+          toast(`Selected "${item.name}" as Lab Tactic B`, "ok");
+        };
+      });
       host.querySelectorAll("[data-dl-tactic]").forEach((btn) => {
         btn.onclick = async () => {
           const item = list[Number(btn.dataset.dlTactic)];
@@ -2157,6 +2283,155 @@
       });
     } catch (err) {
       host.innerHTML = `<div class="empty-note">${esc(err.message)}</div>`;
+    }
+  }
+
+  // ---- FM27 Tactics Lab Tab ----
+  function syncLabTacticInputs() {
+    const syncOne = (kindId, localId, urlId) => {
+      const k = document.getElementById(kindId)?.value || "";
+      const loc = document.getElementById(localId);
+      const url = document.getElementById(urlId);
+      if (loc) loc.style.display = k === "local_fmf" ? "block" : "none";
+      if (url) url.style.display = k === "fm_arena" ? "block" : "none";
+    };
+    syncOne("labTacticAKind", "labTacticALocal", "labTacticAUrl");
+    syncOne("labTacticBKind", "labTacticBLocal", "labTacticBUrl");
+  }
+
+  function renderLabJobs(jobs) {
+    const host = document.getElementById("labJobsHost");
+    if (!host) return;
+    if (!jobs || !jobs.length) {
+      host.innerHTML = '<div class="empty-note">No engine tests yet. Load a save or run a quick A/B test above.</div>';
+      return;
+    }
+    host.innerHTML = jobs.slice(0, 6).map((j) => {
+      const pct = j.total ? Math.round((j.completed / j.total) * 100) : 0;
+      const gA = j.groups?.A;
+      const gB = j.groups?.B;
+      const winA = j.winner && j.winner.startsWith("A ");
+      const winB = j.winner && j.winner.startsWith("B ");
+      const renderBox = (lbl, g, win) => g ? `
+        <div class="lab-ab-box ${win ? "win" : ""}">
+          <div style="font-weight:800;margin-bottom:3px;">${win ? "★ " : ""}${lbl}: ${esc(g.tactic_name || lbl)}</div>
+          <div><strong>${g.ppg} PPG</strong> · ${g.wins}W-${g.draws}D-${g.losses}L</div>
+          <div style="color:var(--muted);font-size:10px;">GF ${g.gf} / GA ${g.ga} (GD ${g.gd >= 0 ? "+" + g.gd : g.gd})</div>
+          <div style="color:var(--muted);font-size:10px;">xG ${g.xgf} / ${g.xga} (xGD ${g.xgd >= 0 ? "+" + g.xgd : g.xgd})</div>
+        </div>
+      ` : "";
+      return `
+        <div class="lab-job-card">
+          <div class="lab-job-head">
+            <span>${esc(j.name)}</span>
+            <span class="etag ${j.status === "completed" ? "lime" : ""}">${esc(j.status)} (${j.completed}/${j.total})</span>
+          </div>
+          ${j.status === "running" || j.status === "queued" ? `
+            <div class="think-progress" style="margin:0;"><div class="think-progress-fill" style="width:${pct}%"></div></div>
+            <div class="modal-note">${esc(j.stage || "Simulating native matches…")}</div>
+          ` : ""}
+          ${(gA || gB) ? `<div class="${gA && gB ? "lab-ab-grid" : ""}">${renderBox("A", gA, winA)}${renderBox("B", gB, winB)}</div>` : ""}
+          ${j.winner ? `<div style="font-size:11px;font-weight:700;">Winner: ${esc(j.winner)}</div>` : ""}
+          <div class="modal-note">
+            Verified: <strong>${j.verified_matches}/${j.completed}</strong>
+            ${j.validation_scope?.length ? ` · Scope: ${esc(j.validation_scope.join(", "))}` : ""}
+          </div>
+          ${j.error ? `<div class="etag danger">${esc(j.error)}</div>` : ""}
+        </div>
+      `;
+    }).join("");
+  }
+
+  async function pollLabJobs() {
+    if (state.labPollTimer) { clearTimeout(state.labPollTimer); state.labPollTimer = null; }
+    try {
+      const res = await apiGet("/api/lab/jobs");
+      const jobs = res.jobs || [];
+      renderLabJobs(jobs);
+      if (jobs.some((j) => j.status === "running" || j.status === "queued")) {
+        state.labPollTimer = setTimeout(pollLabJobs, 2000);
+      }
+    } catch (_) {}
+  }
+
+  async function loadLabTab() {
+    const banner = document.getElementById("labStatusBanner");
+    const ws = document.getElementById("labWorkspace");
+    if (!banner || !ws) return;
+    banner.className = "lab-banner";
+    banner.textContent = "Checking FM27 Tactics Lab engine…";
+    try {
+      const st = await apiGet("/api/lab/status");
+      state.labStatus = st;
+      if (!st.installed) {
+        ws.style.display = "none";
+        banner.className = "lab-banner missing";
+        banner.innerHTML = `
+          <div><strong>FM27 Tactics Lab engine not found locally.</strong></div>
+          <div class="modal-note">To run real native FM27 match-engine A/B &amp; league tests, download <code>seva324/fm-tactics-lab</code> from GitHub?</div>
+          <div class="plan-controls">
+            <button class="mag-cta mag-cta-sm magnetic" id="btnLabDownload"><span>Download Engine</span><span class="orb">↓</span></button>
+            <a class="dl-pill-link" href="${esc(st.repo_url)}" target="_blank" rel="noopener noreferrer">↗ GitHub</a>
+            <button class="mini-btn" id="btnLabRecheck">Re-check</button>
+          </div>
+        `;
+        document.getElementById("btnLabDownload").onclick = async (e) => {
+          const b = e.currentTarget;
+          b.disabled = true;
+          toast("Downloading fm-tactics-lab from GitHub…", "info");
+          try {
+            const dl = await apiPost("/api/lab/install", {});
+            toast(dl.message || dl.error || "Download finished", dl.ok ? "ok" : "error");
+            loadLabTab();
+          } finally {
+            b.disabled = false;
+          }
+        };
+        document.getElementById("btnLabRecheck").onclick = async () => {
+          await apiPost("/api/lab/refresh", {});
+          loadLabTab();
+        };
+        return;
+      }
+
+      banner.className = st.can_simulate ? "lab-banner ok" : "lab-banner missing";
+      banner.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;">
+          <span><strong>${st.can_simulate ? "● Native Engine Ready" : "○ Engine Needs Attention"}</strong> (${esc(st.adapter || "native")})</span>
+          <span class="etag ${st.compatible ? "lime" : ""}">${st.compatible ? "Verified" : (st.trial_allowed ? "Trial" : esc(st.reason || "Check"))}</span>
+        </div>
+        ${st.error ? `<div class="modal-note" style="color:var(--danger);">${esc(st.error)}</div>` : ""}
+      `;
+      ws.style.display = "flex";
+
+      // Populate local .fm saves & local .fmf tactics
+      const saveSel = document.getElementById("labSaveSelect");
+      const saves = st.local_saves?.saves || [];
+      saveSel.innerHTML = saves.length
+        ? saves.map((s) => `<option value="${esc(s.path)}">${esc(s.name)} (${s.size_mb} MB)</option>`).join("")
+        : '<option value="">No .fm saves found in FM27/games</option>';
+
+      const tactics = st.local_tactics?.files || [];
+      const tacticOpts = tactics.length
+        ? tactics.map((t) => `<option value="${esc(t.filename)}">${esc(t.name)}</option>`).join("")
+        : '<option value="">No .fmf files in FM27/tactics</option>';
+      document.getElementById("labTacticALocal").innerHTML = tacticOpts;
+      document.getElementById("labTacticBLocal").innerHTML = tacticOpts;
+      syncLabTacticInputs();
+
+      const loaded = st.loaded_save || {};
+      const note = document.getElementById("labSaveLoadedNote");
+      if (loaded.id) {
+        note.textContent = `Loaded: ${loaded.club_name} (${loaded.opponents_count} league opponents ready)`;
+      }
+      const clubInp = document.getElementById("labClubInput");
+      if (clubInp && !clubInp.value && state.status?.managed_club_raw) {
+        clubInp.value = state.status.managed_club_raw;
+      }
+      pollLabJobs();
+    } catch (err) {
+      banner.className = "lab-banner missing";
+      banner.textContent = `Lab status error: ${err.message}`;
     }
   }
 
@@ -2323,11 +2598,77 @@
         document.querySelectorAll(".ai-mode[data-aimode]").forEach((m) => m.classList.toggle("active", m === el));
         document.getElementById("aiViewChat").classList.toggle("active", state.aiMode === "chat");
         document.getElementById("aiViewTactics").classList.toggle("active", state.aiMode === "tactics");
+        document.getElementById("aiViewLab").classList.toggle("active", state.aiMode === "lab");
         document.getElementById("aiViewTraining").classList.toggle("active", state.aiMode === "training");
         document.getElementById("aiComposer").style.display = state.aiMode === "chat" ? "block" : "none";
         if (state.aiMode === "tactics") loadTacticsTab();
+        if (state.aiMode === "lab") loadLabTab();
         if (state.aiMode === "training") loadTrainingTab();
       };
+    });
+    // Lab tab controls
+    document.getElementById("labTacticAKind")?.addEventListener("change", syncLabTacticInputs);
+    document.getElementById("labTacticBKind")?.addEventListener("change", syncLabTacticInputs);
+    document.getElementById("btnLabRefresh")?.addEventListener("click", loadLabTab);
+    document.getElementById("btnLabLoadSave")?.addEventListener("click", async () => {
+      const savePath = document.getElementById("labSaveSelect")?.value || "";
+      if (!savePath) { toast("Select a .fm save first", "error"); return; }
+      const btn = document.getElementById("btnLabLoadSave");
+      btn.disabled = true; btn.textContent = "Loading…";
+      document.getElementById("labSaveLoadedNote").textContent = "Parsing .fm save & league opponents (may take 15–45s)…";
+      try {
+        const res = await apiPost("/api/lab/load-save", {
+          save_path: savePath,
+          club: document.getElementById("labClubInput")?.value || "",
+        });
+        document.getElementById("labSaveLoadedNote").textContent =
+          `Loaded: ${res.club_name} (${res.opponents_count} league opponents · ${res.tactics?.length || 0} saved tactics)`;
+        toast(`Loaded ${res.club_name} into Tactics Lab`, "ok");
+      } catch (err) {
+        document.getElementById("labSaveLoadedNote").textContent = `Load failed: ${err.message}`;
+        toast(err.message, "error");
+      } finally {
+        btn.disabled = false; btn.textContent = "Load Save";
+      }
+    });
+    document.getElementById("btnLabRun")?.addEventListener("click", async () => {
+      const readTactic = (kindId, localId, urlId) => {
+        const kind = document.getElementById(kindId)?.value || "";
+        if (!kind) return null;
+        if (kind === "local_fmf") return { kind, path: document.getElementById(localId)?.value || "" };
+        if (kind === "fm_arena") return { kind, url: document.getElementById(urlId)?.value || "" };
+        return { kind: "save", tactic_index: 0 };
+      };
+      const tacticB = readTactic("labTacticBKind", "labTacticBLocal", "labTacticBUrl");
+      const tacticA = readTactic("labTacticAKind", "labTacticALocal", "labTacticAUrl");
+      if (!tacticB) { toast("Select Tactic B", "error"); return; }
+      const btn = document.getElementById("btnLabRun");
+      btn.disabled = true;
+      try {
+        const res = await apiPost("/api/lab/run", {
+          tactic_a: tacticA,
+          tactic_b: tacticB,
+          mode: document.getElementById("labTestMode")?.value || "league",
+          opponent_count: Number(document.getElementById("labOppCount")?.value || 4),
+          matches_per_opponent: Number(document.getElementById("labMatchCount")?.value || 2),
+          event_details: false,
+        });
+        toast(`Started native engine test (${res.total} matches)`, "ok");
+        pollLabJobs();
+      } catch (err) {
+        toast(err.message, "error");
+      } finally {
+        btn.disabled = false;
+      }
+    });
+    document.getElementById("btnLabCancel")?.addEventListener("click", async () => {
+      try {
+        await apiPost("/api/lab/cancel", {});
+        toast("Cancellation requested", "info");
+        pollLabJobs();
+      } catch (err) {
+        toast(err.message, "error");
+      }
     });
     document.querySelectorAll(".ai-mode[data-tmode]").forEach((el) => {
       el.onclick = () => {
@@ -2347,9 +2688,74 @@
     const onlineSrc = document.getElementById("onlineTacticSource");
     if (onlineSrc) onlineSrc.onchange = loadOnlineTactics;
 
-    // Chat composer + / Command Palette
+    // Chat composer + Attachments + Inline Model/Reasoning selectors + / Command Palette
     const chatInput = document.getElementById("chatInput");
     document.getElementById("btnSend").onclick = () => sendChat();
+    document.getElementById("btnAttachImg")?.addEventListener("click", () => document.getElementById("chatImageInput")?.click());
+    document.getElementById("btnAttachFile")?.addEventListener("click", () => document.getElementById("chatFileInput")?.click());
+    document.getElementById("chatImageInput")?.addEventListener("change", (e) => {
+      addFilesAsAttachments(e.target.files);
+      e.target.value = "";
+    });
+    document.getElementById("chatFileInput")?.addEventListener("change", (e) => {
+      addFilesAsAttachments(e.target.files);
+      e.target.value = "";
+    });
+    chatInput.addEventListener("paste", (e) => {
+      const items = e.clipboardData?.items || [];
+      const imgs = [];
+      for (const it of items) {
+        if (it.kind === "file" && (it.type || "").startsWith("image/")) {
+          const f = it.getAsFile();
+          if (f) imgs.push(f);
+        }
+      }
+      if (imgs.length) {
+        e.preventDefault();
+        addFilesAsAttachments(imgs);
+      }
+    });
+    const dropZone = document.getElementById("composerDropZone");
+    if (dropZone) {
+      dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("drag-over"); });
+      dropZone.addEventListener("dragleave", () => dropZone.classList.remove("drag-over"));
+      dropZone.addEventListener("drop", (e) => {
+        e.preventDefault();
+        dropZone.classList.remove("drag-over");
+        if (e.dataTransfer?.files?.length) addFilesAsAttachments(e.dataTransfer.files);
+      });
+    }
+    document.getElementById("composerModelSelect")?.addEventListener("change", async (e) => {
+      const model = e.target.value;
+      const r = await apiPost("/api/ai/settings", { model });
+      state.aiSettings = r.ai;
+      syncComposerControls(r.ai);
+      toast(`Model → ${model}`, "info");
+    });
+    document.getElementById("composerReasoningSelect")?.addEventListener("change", async (e) => {
+      const reasoning = e.target.value;
+      const r = await apiPost("/api/ai/settings", { reasoning });
+      state.aiSettings = r.ai;
+      toast(`Thinking effort → ${reasoning}`, "info");
+    });
+    document.getElementById("btnComposerFetchModels")?.addEventListener("click", async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      try {
+        const r = await apiPost("/api/ai/models", {});
+        if (r.ok && r.models?.length) {
+          state.fetchedModels = r.models;
+          syncComposerControls(state.aiSettings);
+          toast(`Loaded ${r.models.length} models`, "ok");
+        } else {
+          toast(r.error || "Could not fetch models", "error");
+        }
+      } catch (err) {
+        toast(err.message, "error");
+      } finally {
+        btn.disabled = false;
+      }
+    });
     document.getElementById("btnSlashCmd").onclick = () => {
       const pal = document.getElementById("cmdPalette");
       if (pal.classList.contains("open")) closeCmdPalette();
@@ -2447,7 +2853,7 @@
         graphics_dir: document.getElementById("setGraphicsDir")?.value ?? "",
       });
       state.aiSettings = r.ai;
-      document.getElementById("modelCaption").textContent = `${r.ai.model} · ${r.ai.reasoning}`;
+      syncComposerControls(r.ai);
       closeSettingsModal();
       renderRecent();
       renderActiveView();
@@ -2488,7 +2894,7 @@
       state.boot = boot;
       state.aiSettings = boot.ai;
       renderStatus(boot.status);
-      document.getElementById("modelCaption").textContent = `${boot.ai.model} · ${boot.ai.reasoning}`;
+      syncComposerControls(boot.ai);
 
       if (!state.recent.length && boot.default_players) {
         for (const p of boot.default_players.slice(0, 3)) {

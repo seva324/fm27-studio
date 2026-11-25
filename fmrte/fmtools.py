@@ -460,6 +460,72 @@ def tool_specs() -> list[dict[str, Any]]:
                 }, ("url",)),
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "fm27_lab_status",
+                "description": (
+                    "Check whether the native FM27 Tactics Lab match engine is installed "
+                    "and ready to simulate. If installed=false, ask the user if they want "
+                    "to download it from https://github.com/seva324/fm-tactics-lab."),
+                "parameters": _schema({}),
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "fm27_lab_inspect_fmf",
+                "description": (
+                    "Parse a local .fmf tactic file using the native FM27 game parser "
+                    "to inspect its exact name, mentality, and dual-phase setup."),
+                "parameters": _schema({
+                    "path": _string("Absolute path or filename inside FM27 tactics folder"),
+                }, ("path",)),
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "fm27_lab_load_save",
+                "description": (
+                    "Import an FM27 .fm save into the native Tactics Lab engine, load the "
+                    "managed club onto the tactics board, and discover league opponents."),
+                "parameters": _schema({
+                    "save_path": _string("Path to .fm save file (omit to load the newest save)"),
+                    "club": _string("Club name hint; defaults to the managed club"),
+                    "tactic_index": _integer("Saved tactic slot index, default 0"),
+                }),
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "fm27_lab_run_ab_test",
+                "description": (
+                    "Run a native FM27 match-engine test or A/B comparison (Tactic A vs Tactic B) "
+                    "against league opponents or neutral fixtures. Tactics can come from 'save', "
+                    "'local_fmf' (filename/path), or 'fm_arena' (thread URL). Always report "
+                    "verified count and validation_scope honestly."),
+                "parameters": _schema({
+                    "tactic_b_kind": _string("'local_fmf', 'fm_arena', or 'save'"),
+                    "tactic_b_ref": _string("Filename/path for local_fmf, URL for fm_arena, or slot index for save"),
+                    "tactic_a_kind": _string("Optional baseline Tactic A kind ('save', 'local_fmf', 'fm_arena') for A/B test"),
+                    "tactic_a_ref": _string("Optional baseline Tactic A filename/path, URL, or slot index"),
+                    "mode": _string("'league' (requires loaded save) or 'quick'"),
+                    "opponent_count": _integer("Number of league opponents, default 4"),
+                    "matches_per_opponent": _integer("Even number of home+away matches per opponent, default 2"),
+                    "wait": _boolean("Wait for short tests to finish (up to 90s) and return verified results"),
+                }, ("tactic_b_kind",)),
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "fm27_lab_jobs",
+                "description": "Get progress and verified match results of FM27 Tactics Lab simulation jobs.",
+                "parameters": _schema({}),
+            },
+        },
     ]
 
 
@@ -613,6 +679,136 @@ def execute_tool(db: Any, name: str, arguments: dict[str, Any],
         if tool == "fm27_download_tactic":
             from . import tacticweb
             return tacticweb.download_fm_arena_tactic(str(args.get("url") or ""))
+        if tool == "fm27_lab_status":
+            return _get_lab_client().status()
+        if tool == "fm27_lab_inspect_fmf":
+            return _lab_inspect_fmf(str(args.get("path") or ""))
+        if tool == "fm27_lab_load_save":
+            return _lab_load_save(
+                str(args.get("save_path") or ""),
+                club() or default_club,
+                as_int(args.get("tactic_index"), 0),
+            )
+        if tool == "fm27_lab_run_ab_test":
+            return _lab_run_ab_test(
+                tactic_b_kind=str(args.get("tactic_b_kind") or "save"),
+                tactic_b_ref=str(args.get("tactic_b_ref") or ""),
+                tactic_a_kind=str(args.get("tactic_a_kind") or ""),
+                tactic_a_ref=str(args.get("tactic_a_ref") or ""),
+                mode=str(args.get("mode") or "league"),
+                opponent_count=as_int(args.get("opponent_count"), 4),
+                matches_per_opponent=as_int(args.get("matches_per_opponent"), 2),
+                wait=bool(args.get("wait", True)),
+            )
+        if tool == "fm27_lab_jobs":
+            client = _get_lab_client()
+            if not client.installed:
+                return _lab_missing_response()
+            return {"ok": True, "jobs": client.list_jobs()}
     except Exception as exc:  # noqa: BLE001 - a tool must never break a turn
         return {"error": f"{tool} failed: {type(exc).__name__}: {exc}"}
     return {"error": f"{tool} is not a tool this build provides"}
+
+
+_SHARED_LAB_CLIENT: Any = None
+
+
+def set_lab_client(client: Any) -> None:
+    """Register Studio's shared TacticsLabClient so AI tools reuse one engine process."""
+    global _SHARED_LAB_CLIENT
+    _SHARED_LAB_CLIENT = client
+
+
+def _get_lab_client():
+    global _SHARED_LAB_CLIENT
+    if _SHARED_LAB_CLIENT is None:
+        from . import tacticslab
+        _SHARED_LAB_CLIENT = tacticslab.TacticsLabClient()
+    return _SHARED_LAB_CLIENT
+
+
+def _tactic_spec(kind: str, ref: str) -> dict[str, Any]:
+    k = (kind or "save").strip().lower()
+    if k == "fm_arena":
+        return {"kind": "fm_arena", "url": ref}
+    if k == "local_fmf":
+        return {"kind": "local_fmf", "path": ref}
+    return {"kind": "save", "tactic_index": as_int(ref, 0)}
+
+
+def _lab_missing_response() -> dict[str, Any]:
+    from . import tacticslab
+    return {
+        "ok": False,
+        "installed": False,
+        "repo_url": tacticslab.LAB_REPO_URL,
+        "error": (
+            "FM27 Tactics Lab engine is not installed locally. "
+            f"Ask the user if they want to download it from {tacticslab.LAB_REPO_URL} "
+            "(or click 'Download Engine' in the Lab tab)."
+        ),
+    }
+
+
+def _lab_inspect_fmf(raw_path: str) -> dict[str, Any]:
+    import os
+    from . import tacticweb
+    client = _get_lab_client()
+    if not client.installed:
+        return _lab_missing_response()
+    raw = raw_path.strip()
+    if not raw:
+        return {"error": "path is required"}
+    path = raw if os.path.isabs(raw) else os.path.join(tacticweb.detect_fm27_tactics_dir(), raw)
+    res = client.inspect_fmf_file(path)
+    res.pop("scenario", None)
+    return res
+
+
+def _lab_load_save(save_path: str, club_hint: str, tactic_index: int) -> dict[str, Any]:
+    from . import tacticslab
+    client = _get_lab_client()
+    if not client.installed:
+        return _lab_missing_response()
+    sp = save_path.strip()
+    if not sp:
+        saves = tacticslab.list_local_saves().get("saves") or []
+        if not saves:
+            return {"error": "No .fm save files found in the FM27 games folder."}
+        sp = saves[0]["path"]
+    return client.import_and_load_save(
+        sp,
+        club_name_hint=club_hint or "",
+        tactic_index=tactic_index,
+    )
+
+
+def _lab_run_ab_test(*, tactic_b_kind: str, tactic_b_ref: str,
+                     tactic_a_kind: str, tactic_a_ref: str,
+                     mode: str, opponent_count: int,
+                     matches_per_opponent: int, wait: bool) -> dict[str, Any]:
+    import time
+    client = _get_lab_client()
+    if not client.installed:
+        return _lab_missing_response()
+    tb = _tactic_spec(tactic_b_kind, tactic_b_ref)
+    ta = _tactic_spec(tactic_a_kind, tactic_a_ref) if tactic_a_kind.strip() else None
+    started = client.start_ab_test(
+        tactic_b=tb,
+        tactic_a=ta,
+        mode=mode,
+        opponent_count=opponent_count,
+        matches_per_opponent=matches_per_opponent,
+        event_details=False,
+    )
+    if wait and started.get("job_id"):
+        jid = started["job_id"]
+        deadline = time.monotonic() + 90.0
+        while time.monotonic() < deadline:
+            jobs = client.list_jobs()
+            cur = next((j for j in jobs if j.get("id") == jid), None)
+            if cur and cur.get("status") not in ("queued", "running"):
+                started["result"] = cur
+                return started
+            time.sleep(1.5)
+    return started

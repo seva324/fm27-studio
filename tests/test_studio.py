@@ -139,6 +139,7 @@ class StudioServerTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls) -> None:
         cls.server.stop()
+        cls.backend.close()
         cls.db.close()
 
     def tearDown(self) -> None:
@@ -481,8 +482,83 @@ class StudioServerTests(unittest.TestCase):
             tool_names = {t["function"]["name"] for t in fmtools.tool_definitions()}
             self.assertIn("fm27_search_online_tactics", tool_names)
             self.assertIn("fm27_download_tactic", tool_names)
+            self.assertIn("fm27_lab_status", tool_names)
+            self.assertIn("fm27_lab_run_ab_test", tool_names)
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_chat_multimodal_images_fmf_attachments_reasoning_and_lab_summary(self) -> None:
+        import base64
+        from fmrte import tacticslab
+
+        # 1) Reasoning effort forwarded in _http_chat & multimodal image array in chat_with_tools
+        sent_bodies: list[dict] = []
+
+        class _FakeResp:
+            def __enter__(self):
+                return self
+            def __exit__(self, *_a):
+                return False
+            def read(self, _n=-1):
+                return json.dumps({"choices": [{"message": {"content": "Looks good!"}}]}).encode("utf-8")
+
+        def fake_urlopen(req, timeout=10):
+            sent_bodies.append(json.loads(req.data.decode("utf-8")))
+            return _FakeResp()
+
+        settings = A.AssistantSettings(
+            provider="openai", base_url="http://example.invalid/v1",
+            model="gpt-5", reasoning="High", enabled=True,
+        )
+        tiny_png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            reply = A.chat_with_tools(
+                settings, "sk-test", self.db, "Check this tactic screenshot",
+                user_images=[{"name": "tactic.png", "mime": "image/png", "data_url": tiny_png}],
+            )
+        self.assertEqual(reply, "Looks good!")
+        self.assertEqual(sent_bodies[0].get("reasoning_effort"), "high")
+        user_content = sent_bodies[0]["messages"][-1]["content"]
+        self.assertIsInstance(user_content, list)
+        self.assertEqual(user_content[1]["type"], "image_url")
+        self.assertEqual(user_content[1]["image_url"]["url"], tiny_png)
+
+        # 2) .fmf attachment saved & annotated in _prepare_chat_attachments
+        fake_fmf = b"\x02\x01afe.\x08\x00" + b"\x00" * 40
+        imgs, notes = self.backend._prepare_chat_attachments([
+            {"kind": "image", "name": "shot.png", "mime": "image/png", "data_url": tiny_png},
+            {"kind": "fmf", "name": "My 4-2-3-1.fmf", "base64": base64.b64encode(fake_fmf).decode("ascii")},
+        ])
+        self.assertEqual(len(imgs), 1)
+        self.assertIn("My 4-2-3-1.fmf", notes)
+        self.assertIn("fm27_lab_run_ab_test", notes)
+
+        # 3) Tactics Lab job summary computes A/B winner, verified count & validation_scope
+        summary = tacticslab._summarize_job({
+            "id": "job1", "name": "AB test", "status": "completed", "mode": "comparison",
+            "completed": 4, "total": 4,
+            "tactic_snapshots": {"A": {"tactic_name": "Old 4-4-2"}, "B": {"tactic_name": "Meta 4-2-3-1"}},
+            "runs": [
+                {"variant": "A_0_H", "verified": True, "validation_scope": "native_match_score_and_team_statistics",
+                 "result": {"score": [1, 1]}, "statistics": {"teams": [{"xg": 1.2}, {"xg": 1.1}]}},
+                {"variant": "A_0_A", "verified": True, "validation_scope": "native_match_score_and_team_statistics",
+                 "result": {"score": [2, 0]}, "statistics": {"teams": [{"xg": 1.8}, {"xg": 0.6}]}},
+                {"variant": "B_0_H", "verified": True, "validation_scope": "native_match_score_and_team_statistics",
+                 "result": {"score": [3, 0]}, "statistics": {"teams": [{"xg": 2.4}, {"xg": 0.5}]}},
+                {"variant": "B_0_A", "verified": True, "validation_scope": "native_match_score_and_team_statistics",
+                 "result": {"score": [1, 2]}, "statistics": {"teams": [{"xg": 0.9}, {"xg": 1.9}]}},
+            ],
+        })
+        self.assertEqual(summary["verified_matches"], 4)
+        self.assertIn("native_match_score_and_team_statistics", summary["validation_scope"])
+        self.assertEqual(summary["groups"]["B"]["ppg"], 3.0)
+        self.assertEqual(summary["groups"]["A"]["ppg"], 0.5)
+        self.assertIn("Meta 4-2-3-1", summary["winner"])
+
+        # 4) /api/lab/status responds cleanly (installed or missing-engine prompt with repo_url)
+        code, lab_st = _http_json(f"{self.base}/api/lab/status", token=self.token)
+        self.assertEqual(code, 200)
+        self.assertEqual(lab_st["repo_url"], tacticslab.LAB_REPO_URL)
 
     def test_search_transfers_retirements_and_plans(self) -> None:
         for scope in ("players", "clubs", "staff", "nations"):

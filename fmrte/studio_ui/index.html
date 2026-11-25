@@ -135,6 +135,7 @@
         <div class="ai-seg">
           <div class="ai-mode active" data-aimode="chat">Chat</div>
           <div class="ai-mode" data-aimode="tactics">Tactics</div>
+          <div class="ai-mode" data-aimode="lab">Lab</div>
           <div class="ai-mode" data-aimode="training">Training</div>
         </div>
       </div>
@@ -193,6 +194,83 @@
           </div>
         </div>
 
+        <!-- LAB TAB (FM27 Tactics Lab Native Match Engine) -->
+        <div class="ai-panel-view" id="aiViewLab">
+          <div id="labStatusBanner" class="lab-banner">Checking FM27 Tactics Lab engine…</div>
+          <div id="labWorkspace" style="display:none;flex-direction:column;gap:9px;">
+            <div class="card">
+              <div class="card-head">
+                <span>1. Load Current Save (.fm)</span>
+                <button class="mini-btn" id="btnLabRefresh" style="height:24px;padding:0 8px;font-size:10.5px;">↻</button>
+              </div>
+              <div class="card-body" style="display:flex;flex-direction:column;gap:6px;">
+                <select id="labSaveSelect" class="mini-select" style="width:100%;"></select>
+                <div class="plan-controls">
+                  <input id="labClubInput" class="filter-input" style="flex:1;height:29px;" placeholder="Club name (auto managed club)" />
+                  <button class="mini-btn mini-btn-dark" id="btnLabLoadSave">Load Save</button>
+                </div>
+                <div class="modal-note" id="labSaveLoadedNote">No save loaded onto tactics board yet (Quick Test still works).</div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-head"><span>2. A/B Tactics &amp; League Test</span></div>
+              <div class="card-body" style="display:flex;flex-direction:column;gap:7px;">
+                <div class="lab-row">
+                  <span class="lab-lbl">Tactic A (Baseline)</span>
+                  <select id="labTacticAKind" class="mini-select">
+                    <option value="">None (Single Test)</option>
+                    <option value="save" selected>Current Save Tactic</option>
+                    <option value="local_fmf">Local .fmf File</option>
+                    <option value="fm_arena">FM-Arena URL</option>
+                  </select>
+                </div>
+                <select id="labTacticALocal" class="mini-select" style="display:none;width:100%;"></select>
+                <input id="labTacticAUrl" class="filter-input" style="display:none;width:100%;height:28px;" placeholder="https://fm-arena.com/threads/..." />
+
+                <div class="lab-row">
+                  <span class="lab-lbl">Tactic B (Candidate)</span>
+                  <select id="labTacticBKind" class="mini-select">
+                    <option value="local_fmf" selected>Local .fmf File</option>
+                    <option value="fm_arena">FM-Arena URL</option>
+                    <option value="save">Current Save Tactic</option>
+                  </select>
+                </div>
+                <select id="labTacticBLocal" class="mini-select" style="width:100%;"></select>
+                <input id="labTacticBUrl" class="filter-input" style="display:none;width:100%;height:28px;" placeholder="https://fm-arena.com/threads/..." />
+
+                <div class="plan-controls">
+                  <select id="labTestMode" class="mini-select">
+                    <option value="league">League Opponents</option>
+                    <option value="quick">Quick Neutral Test</option>
+                  </select>
+                  <select id="labOppCount" class="mini-select" title="Opponents">
+                    <option value="2">2 Opps</option>
+                    <option value="4" selected>4 Opps</option>
+                    <option value="8">8 Opps</option>
+                  </select>
+                  <select id="labMatchCount" class="mini-select" title="Matches per opponent (H+A)">
+                    <option value="2" selected>2 / opp</option>
+                    <option value="4">4 / opp</option>
+                    <option value="6">6 / opp</option>
+                  </select>
+                </div>
+
+                <div class="plan-controls">
+                  <button class="mag-cta mag-cta-sm magnetic" id="btnLabRun" style="flex:1;justify-content:center;">
+                    <span>Run Native Test</span><span class="orb">▶</span>
+                  </button>
+                  <button class="mini-btn" id="btnLabCancel" title="Cancel active job">Stop</button>
+                </div>
+              </div>
+            </div>
+
+            <div id="labJobsHost" class="plan-host">
+              <div class="empty-note">Run a league or A/B test to view verified match engine results.</div>
+            </div>
+          </div>
+        </div>
+
         <!-- TRAINING TAB -->
         <div class="ai-panel-view" id="aiViewTraining">
           <div class="plan-controls">
@@ -223,17 +301,31 @@
 
       <!-- COMPOSER -->
       <div class="ai-composer" id="aiComposer">
-        <div class="composer-box">
-          <textarea id="chatInput" placeholder="Type / for commands, or ask about this player, club or tactic…"></textarea>
+        <input id="chatImageInput" type="file" accept="image/*" multiple style="display:none" />
+        <input id="chatFileInput" type="file" accept=".fmf,.json,.txt,.csv,.md,.log" multiple style="display:none" />
+        <div class="composer-box" id="composerDropZone">
+          <div class="attach-strip" id="chatAttachStrip" style="display:none;"></div>
+          <textarea id="chatInput" placeholder="Type / for commands, paste screenshots (Ctrl+V), or attach .fmf tactics…"></textarea>
           <div class="composer-foot">
             <div class="composer-left">
-              <button class="slash-pill magnetic" id="btnSlashCmd">/ Commands</button>
-              <span class="model-caption" id="modelCaption">—</span>
+              <button class="slash-pill magnetic" id="btnSlashCmd" title="AI Slash Commands">/ Cmd</button>
+              <button class="icon-btn icon-xs magnetic" id="btnAttachImg" title="Upload Image (or Ctrl+V paste)">🖼</button>
+              <button class="icon-btn icon-xs magnetic" id="btnAttachFile" title="Upload Attachment (.fmf / .json / .txt)">📎</button>
             </div>
-            <button class="mag-cta mag-cta-sm magnetic" id="btnSend">
-              <span>Send</span>
-              <span class="orb">→</span>
-            </button>
+            <div class="composer-right">
+              <select id="composerModelSelect" class="composer-select" title="Active AI Model"></select>
+              <button class="icon-btn icon-xs" id="btnComposerFetchModels" title="Fetch models from provider">↻</button>
+              <select id="composerReasoningSelect" class="composer-select composer-select-sm" title="Thinking / Reasoning Effort">
+                <option value="Default">Auto</option>
+                <option value="Low">Low</option>
+                <option value="Medium">Med</option>
+                <option value="High">High</option>
+              </select>
+              <button class="mag-cta mag-cta-sm magnetic" id="btnSend">
+                <span>Send</span>
+                <span class="orb">→</span>
+              </button>
+            </div>
           </div>
         </div>
       </div>

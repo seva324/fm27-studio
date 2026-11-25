@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from . import assistant as A
-from . import fmplans, fmtools, ratings, spec, tacticweb
+from . import fmplans, fmtools, ratings, spec, tacticslab, tacticweb
 from .db import DATE_COLUMNS, SQUAD_COLUMNS, Snapshot
 
 DEFAULT_CLUB = "Milan"
@@ -279,8 +279,14 @@ class StudioBackend:
         self._attach_lock = threading.Lock()
         self._prefs = _load_studio_prefs()
         self.faces = _FaceResolver(str(self._prefs.get("graphics_dir") or ""))
+        self.lab = tacticslab.TacticsLabClient(str(self._prefs.get("lab_dir") or ""))
+        fmtools.set_lab_client(self.lab)
 
     def close(self) -> None:
+        try:
+            self.lab.stop()
+        except Exception:
+            pass
         try:
             self.db.detach_live()
         except Exception:
@@ -1049,12 +1055,77 @@ class StudioBackend:
             return f"Create a weekly FM27 training plan for {club} focused on: {target}.", None
         return text, None
 
+    def _prepare_chat_attachments(self, attachments: list[dict[str, Any]] | None
+                                  ) -> tuple[list[dict[str, str]], str]:
+        """Split chat attachments into Vision images + formatted text/FMF context."""
+        if not attachments or not isinstance(attachments, list):
+            return [], ""
+        import base64
+        images: list[dict[str, str]] = []
+        notes: list[str] = []
+        upload_dir = os.path.join(A.data_directory(), "uploads")
+        for att in attachments[:6]:
+            if not isinstance(att, dict):
+                continue
+            name = os.path.basename(str(att.get("name") or "attachment")).strip() or "attachment"
+            kind = str(att.get("kind") or "").strip().lower()
+            mime = str(att.get("mime") or "").strip().lower()
+            if kind == "image" or mime.startswith("image/"):
+                data_url = str(att.get("data_url") or "").strip()
+                if data_url.startswith("data:image/") and len(data_url) < 12_000_000:
+                    images.append({"name": name, "mime": mime or "image/png", "data_url": data_url})
+                    notes.append(f"[Attached image: {name}]")
+                continue
+            if name.lower().endswith(".fmf") or kind == "fmf":
+                b64 = str(att.get("base64") or "").strip()
+                if b64:
+                    try:
+                        raw = base64.b64decode(b64, validate=True)
+                    except ValueError:
+                        notes.append(f"[Attached .fmf file {name}: invalid base64]")
+                        continue
+                    os.makedirs(upload_dir, exist_ok=True)
+                    safe_name = tacticweb._safe_fmf_filename(name)
+                    saved_path = os.path.join(upload_dir, safe_name)
+                    try:
+                        with open(saved_path, "wb") as handle:
+                            handle.write(raw)
+                    except OSError:
+                        saved_path = ""
+                    decoded_note = ""
+                    if self.lab.installed:
+                        try:
+                            info = self.lab.inspect_fmf_bytes(raw)
+                            rep = info.get("report") or {}
+                            decoded_note = (
+                                f" (Native FM27 decode OK: tactic_name={info.get('tactic_name')!r}, "
+                                f"mentality={info.get('mentality')}, phases={info.get('phases_count')}, "
+                                f"notice={rep.get('notice', '')})"
+                            )
+                        except Exception as exc:
+                            decoded_note = f" (Native decode note: {exc})"
+                    notes.append(
+                        f"[Attached FM27 .fmf file: {safe_name}, {len(raw):,} bytes"
+                        + (f", saved at {saved_path}" if saved_path else "")
+                        + decoded_note
+                        + (f". You can test this tactic with fm27_lab_run_ab_test using tactic_b_kind='local_fmf' and tactic_b_ref='{saved_path}'." if saved_path else "")
+                        + "]"
+                    )
+                continue
+            text_body = str(att.get("text") or "")
+            if text_body:
+                snippet = text_body[:20000]
+                notes.append(f"[Attached file: {name}]\n```\n{snippet}\n```")
+        return images, ("\n\n".join(notes) + "\n\n" if notes else "")
+
     def stream_chat(self, prompt: str, context: dict[str, Any],
-                    emit: Any) -> None:
+                    emit: Any,
+                    attachments: list[dict[str, Any]] | None = None) -> None:
         """Execute one chat turn, emitting SSE dicts to ``emit(dict)``."""
         raw_prompt = (prompt or "").strip()
-        if not raw_prompt:
-            emit({"type": "error", "message": "Please enter a question or /command."})
+        user_images, attach_notes = self._prepare_chat_attachments(attachments)
+        if not raw_prompt and not user_images and not attach_notes:
+            emit({"type": "error", "message": "Please enter a question, attach a file, or use a /command."})
             return
 
         expanded, instant = self._expand_slash(raw_prompt, context or {})
@@ -1079,14 +1150,14 @@ class StudioBackend:
             ctx_note = f"[Active screen context: Club {context.get('name')}]\n"
         elif context and context.get("kind") == "staff" and context.get("name"):
             ctx_note = f"[Active screen context: Staff {context.get('name')} (UID {context.get('id')})]\n"
-        full_prompt = ctx_note + (expanded or raw_prompt)
+        full_prompt = ctx_note + attach_notes + (expanded or raw_prompt or "Please analyze the attached file(s).")
 
         with self._ai_lock:
             settings = self.settings
             key = self.keys.load()
             history = [{"role": m.role, "text": m.text}
                        for m in self.conversation.messages[-12:] if not m.failed]
-            self.conversation.add("user", raw_prompt)
+            self.conversation.add("user", raw_prompt or "[Attachment]")
 
         club_name = (context or {}).get("club") or self.status_payload()["managed_club_raw"]
         t0 = time.perf_counter()
@@ -1096,6 +1167,7 @@ class StudioBackend:
                 history=history,
                 club_name=club_name,
                 on_event=emit,
+                user_images=user_images or None,
             )
             with self._ai_lock:
                 self.conversation.add("assistant", answer)
@@ -1142,7 +1214,7 @@ def _make_handler(backend: StudioBackend, token: str):
 
         def _read_json(self) -> dict[str, Any]:
             length = int(self.headers.get("Content-Length", "0") or 0)
-            if length <= 0 or length > 2_000_000:
+            if length <= 0 or length > 16_000_000:
                 return {}
             raw = self.rfile.read(length)
             try:
@@ -1223,6 +1295,13 @@ def _make_handler(backend: StudioBackend, token: str):
                 ))
             elif path == "/api/tactics/local":
                 self._send_json(backend.local_tactics_and_schedules())
+            elif path == "/api/lab/status":
+                self._send_json(backend.lab.status())
+            elif path == "/api/lab/jobs":
+                try:
+                    self._send_json({"ok": True, "jobs": backend.lab.list_jobs()})
+                except Exception as exc:
+                    self._send_json({"ok": False, "error": str(exc), "jobs": []})
             elif path == "/api/ai/settings":
                 self._send_json(backend.ai_settings_payload())
             elif path.startswith("/api/player/"):
@@ -1327,6 +1406,50 @@ def _make_handler(backend: StudioBackend, token: str):
                 self._send_json(backend.clear_chat())
             elif path == "/api/tactics/download":
                 self._send_json(backend.download_tactic(str(body.get("url") or "")))
+            elif path == "/api/lab/install":
+                res = tacticslab.download_lab_from_github(str(body.get("dest_dir") or "") or None)
+                backend.lab.refresh_install()
+                res["status"] = backend.lab.status()
+                self._send_json(res)
+            elif path == "/api/lab/refresh":
+                custom = body.get("dir")
+                if isinstance(custom, str) and custom.strip():
+                    backend._prefs["lab_dir"] = custom.strip()
+                    _save_studio_prefs(backend._prefs)
+                    backend.lab.refresh_install(custom.strip())
+                else:
+                    backend.lab.refresh_install()
+                self._send_json(backend.lab.status())
+            elif path == "/api/lab/load-save":
+                try:
+                    res = backend.lab.import_and_load_save(
+                        str(body.get("save_path") or ""),
+                        club_name_hint=str(body.get("club") or ""),
+                        club_uid=_opt_int(body.get("club_uid")),
+                        tactic_index=int(body.get("tactic_index") or 0),
+                    )
+                    self._send_json(res)
+                except Exception as exc:
+                    self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            elif path == "/api/lab/run":
+                try:
+                    res = backend.lab.start_ab_test(
+                        tactic_b=body.get("tactic_b") or {"kind": "save", "tactic_index": 0},
+                        tactic_a=body.get("tactic_a"),
+                        mode=str(body.get("mode") or "league"),
+                        opponent_count=int(body.get("opponent_count") or 4),
+                        matches_per_opponent=int(body.get("matches_per_opponent") or 2),
+                        event_details=bool(body.get("event_details", False)),
+                        name=str(body.get("name") or ""),
+                    )
+                    self._send_json(res)
+                except Exception as exc:
+                    self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            elif path == "/api/lab/cancel":
+                try:
+                    self._send_json({"ok": True, "result": backend.lab.cancel_job()})
+                except Exception as exc:
+                    self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
             elif path == "/api/ai/chat":
                 self._stream_ai_chat(body)
             elif path.startswith("/api/player/"):
@@ -1368,6 +1491,7 @@ def _make_handler(backend: StudioBackend, token: str):
                         str(body.get("prompt") or ""),
                         body.get("context") if isinstance(body.get("context"), dict) else {},
                         events.put,
+                        attachments=body.get("attachments") if isinstance(body.get("attachments"), list) else None,
                     )
                 finally:
                     events.put(None)
