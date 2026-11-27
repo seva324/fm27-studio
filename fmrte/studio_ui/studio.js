@@ -9,6 +9,7 @@
   }
 
   const SLASH_COMMANDS = [
+    { key: "/lab",       ico: "⚗", desc: "Run native Match Lab A/B test", insert: "/lab " },
     { key: "/analyze",   ico: "+", desc: "Analyze squad depth & morale",  insert: "/analyze " },
     { key: "/compare",   ico: "⇄", desc: "Compare with target player",    insert: "/compare " },
     { key: "/bestxi",    ico: "◈", desc: "Optimal starting XI & roles",   insert: "/bestxi " },
@@ -31,11 +32,20 @@
     cmdIndex: 0,
     compareOtherUid: null,
     compareSub: "overview",
-    searchState: { scope: "players", q: "", pos: "Any", job: "Any", min_age: "", max_age: "", min_ca: "", listed: false },
+    searchState: {
+      scope: "players", q: "", pos: "Any", job: "Any",
+      min_age: "", max_age: "", min_ca: "", max_ca: "", min_pa: "", max_pa: "",
+      min_pos_rating: "", listed: false,
+      attr_group: "Physical", attr_col: "pace", attr_min: "", attr_max: "",
+      attr_filters: [],
+      staff_cat: "", min_stars: "",
+    },
     transferState: { mode: "listed", q: "" },
     retireState: { kind: "players", min_age: 35, q: "" },
     sortState: {},        // tableId -> { col, asc }
     chatTurns: [],        // [{ role, text, attachments, steps, thinking, tools, error }]
+    chatSessions: [],     // [{ id, title, updated_at, turn_count }]
+    activeSessionId: "",
     pendingAttachments: [],
     fetchedModels: [],
     labStatus: null,
@@ -68,27 +78,51 @@
     return (name || fallback).split(/\s+/).filter(Boolean).map((w) => w[0]).join("").slice(0, 2).toUpperCase() || fallback;
   }
 
-  function avatarUrl(kind, uid) {
-    if (!uid || (kind !== "player" && kind !== "staff")) return "";
-    return `/api/avatar/${kind}/${encodeURIComponent(uid)}?token=${encodeURIComponent(TOKEN)}`;
+  function avatarUrl(kind, key) {
+    if (key == null || key === "") return "";
+    if (!["player", "staff", "club", "nation"].includes(kind)) return "";
+    return `/api/avatar/${kind}/${encodeURIComponent(String(key))}?token=${encodeURIComponent(TOKEN)}`;
   }
 
-  function avatarHTML(kind, uid, initials, extraClass = "") {
-    const src = avatarUrl(kind, uid);
+  function avatarHTML(kind, key, initials, extraClass = "") {
+    const src = avatarUrl(kind, key);
+    const fit = (kind === "club" || kind === "nation") ? " logo-fit" : "";
     const img = src
       ? `<img src="${src}" alt="" loading="lazy" onload="this.parentElement.classList.add('has-photo')" onerror="this.remove()" />`
       : "";
-    return `<div class="avatar ${extraClass}"><span class="avatar-init">${esc(initials)}</span>${img}</div>`;
+    return `<div class="avatar ${extraClass}${fit}"><span class="avatar-init">${esc(initials)}</span>${img}</div>`;
   }
 
   function navAvatarHTML(r) {
     if (r.kind === "player" || r.kind === "staff") {
-      const init = initialsOf(r.title, "P");
+      const init = initialsOf(r.title, r.kind === "staff" ? "S" : "P");
       const src = avatarUrl(r.kind, r.id);
       return `<span class="nav-avatar"><span>${esc(init)}</span><img src="${src}" alt="" loading="lazy" onload="this.parentElement.classList.add('has-photo')" onerror="this.remove()" /></span>`;
     }
-    const icons = { club: "◈", nation: "◎" };
-    return `<span class="ico">${icons[r.kind] || "•"}</span>`;
+    if (r.kind === "club" || r.kind === "nation") {
+      const glyph = r.kind === "club" ? "◈" : "◎";
+      const key = r.id != null && r.id !== "" ? r.id : r.title;
+      const src = avatarUrl(r.kind, key);
+      const img = src
+        ? `<img src="${src}" alt="" loading="lazy" onload="this.parentElement.classList.add('has-photo')" onerror="this.remove()" />`
+        : "";
+      return `<span class="nav-avatar logo-fit"><span>${glyph}</span>${img}</span>`;
+    }
+    return `<span class="ico">•</span>`;
+  }
+
+  function squadAvatarHTML(kind, key, name) {
+    const isLogo = (kind === "club" || kind === "nation");
+    const init = kind === "club"
+      ? initialsOf(name, "C")
+      : kind === "nation"
+        ? initialsOf(name, "N")
+        : initialsOf(name, kind === "staff" ? "S" : "P");
+    const src = avatarUrl(kind, key);
+    const img = src
+      ? `<img src="${src}" alt="" loading="lazy" onload="this.parentElement.classList.add('has-photo')" onerror="this.remove()" />`
+      : "";
+    return `<span class="squad-avatar${isLogo ? " logo-fit" : ""}"><span>${esc(init)}</span>${img}</span>`;
   }
 
   function numClass(val) {
@@ -189,10 +223,26 @@
 
     const zoomSlider = document.getElementById("zoomSlider");
     const zoomLabel = document.getElementById("zoomLabel");
-    zoomSlider.oninput = () => {
-      zoomLabel.textContent = zoomSlider.value + "%";
-      document.body.style.zoom = zoomSlider.value + "%";
+    const applyZoom = (pct) => {
+      const clamped = Math.max(85, Math.min(130, Math.round(Number(pct) || 100)));
+      const z = clamped / 100;
+      zoomSlider.value = String(clamped);
+      zoomLabel.textContent = clamped + "%";
+      document.body.style.zoom = "";
+      const root = document.getElementById("appRoot");
+      if (root) {
+        root.style.zoom = z === 1 ? "" : String(z);
+        root.style.width = z === 1 ? "" : `${(100 / z).toFixed(4)}vw`;
+        root.style.height = z === 1 ? "" : `${(100 / z).toFixed(4)}vh`;
+      }
+      try { localStorage.setItem("fm27_ui_zoom", String(clamped)); } catch (_) {}
     };
+    zoomSlider.oninput = () => applyZoom(zoomSlider.value);
+    zoomLabel.ondblclick = () => applyZoom(100);
+    try {
+      const savedZoom = localStorage.getItem("fm27_ui_zoom");
+      if (savedZoom) applyZoom(savedZoom);
+    } catch (_) {}
   }
 
   // ---- Status Bar & Topbar Sync ----
@@ -643,11 +693,14 @@
         </div>
       `;
       const isGk = (p.pos || "").startsWith("GK");
-      const condPct = Math.max(0, Math.min(100, (Number(p.condition || 0) / 100)));
-      const sharpPct = Math.max(0, Math.min(100, (Number(p.sharpness || 0) / 100)));
-      const moraleVal = Number(p.morale ?? 0);
-      const moralePct = Math.max(0, Math.min(100, moraleVal <= 20 && !state.status?.attached ? moraleVal * 5 : moraleVal));
-      const jadePct = Math.max(4, Math.min(100, Math.abs(Number(p.jadedness || 0)) / 10));
+      const condVal = Math.max(0, Math.min(10000, Number(p.condition ?? 0)));
+      const sharpVal = Math.max(0, Math.min(10000, Number(p.sharpness ?? 0)));
+      const moraleVal = Math.max(0, Math.min(100, Number(p.morale ?? 0)));
+      const jadeVal = Math.max(-500, Math.min(1500, Number(p.jadedness ?? 0)));
+      const condPct = (condVal / 100).toFixed(1);
+      const sharpPct = (sharpVal / 100).toFixed(1);
+      const moralePct = (moraleVal <= 20 && !state.status?.attached ? moraleVal * 5 : moraleVal).toFixed(1);
+      const jadePct = (((jadeVal + 500) / 2000) * 100).toFixed(1);
 
       subHTML = `
         <div class="grid-4">
@@ -655,23 +708,23 @@
           ${renderGroup("Mental", p.attributes.Mental || [])}
           ${renderGroup("Physical", p.attributes.Physical || [])}
           <div class="card">
-            <div class="card-head"><span>Live Status &amp; Hidden</span><span style="color:var(--muted)">RAM</span></div>
+            <div class="card-head"><span>Live Status &amp; Hidden</span><span style="color:var(--muted)">Drag / Click</span></div>
             <div class="card-body">
               <div class="meter-row">
-                <div class="meter-head"><span>Condition</span><span class="meter-val" data-edit-col="condition" data-edit-val="${p.condition ?? 0}">${Number(p.condition || 0).toLocaleString()}</span></div>
-                <div class="meter-track"><div class="meter-fill" style="width:${condPct}%"></div></div>
+                <div class="meter-head"><span>Condition</span><span class="meter-val" data-slider-val="condition" data-edit-col="condition" data-edit-val="${condVal}">${condVal.toLocaleString()}</span></div>
+                <input type="range" class="status-slider" data-slider-col="condition" min="0" max="10000" step="100" value="${condVal}" style="--pct:${condPct}%" />
               </div>
               <div class="meter-row">
-                <div class="meter-head"><span>Match Sharpness</span><span class="meter-val" data-edit-col="match_sharpness" data-edit-val="${p.sharpness ?? 0}">${Number(p.sharpness || 0).toLocaleString()}</span></div>
-                <div class="meter-track"><div class="meter-fill dark" style="width:${sharpPct}%"></div></div>
+                <div class="meter-head"><span>Match Sharpness</span><span class="meter-val" data-slider-val="match_sharpness" data-edit-col="match_sharpness" data-edit-val="${sharpVal}">${sharpVal.toLocaleString()}</span></div>
+                <input type="range" class="status-slider dark" data-slider-col="match_sharpness" min="0" max="10000" step="100" value="${sharpVal}" style="--pct:${sharpPct}%" />
               </div>
               <div class="meter-row">
-                <div class="meter-head"><span>Morale (0–100)</span><span class="meter-val" data-edit-col="morale" data-edit-val="${p.morale ?? 0}">${p.morale ?? "—"}</span></div>
-                <div class="meter-track"><div class="meter-fill" style="width:${moralePct}%"></div></div>
+                <div class="meter-head"><span>Morale (0–100)</span><span class="meter-val" data-slider-val="morale" data-edit-col="morale" data-edit-val="${moraleVal}">${p.morale ?? "—"}</span></div>
+                <input type="range" class="status-slider" data-slider-col="morale" min="0" max="100" step="1" value="${moraleVal}" style="--pct:${moralePct}%" />
               </div>
               <div class="meter-row" style="margin-bottom:10px;">
-                <div class="meter-head"><span>Jadedness</span><span class="meter-val" data-edit-col="jadedness" data-edit-val="${p.jadedness ?? 0}">${p.jadedness ?? 0}</span></div>
-                <div class="meter-track"><div class="meter-fill dark" style="width:${jadePct}%"></div></div>
+                <div class="meter-head"><span>Jadedness</span><span class="meter-val" data-slider-val="jadedness" data-edit-col="jadedness" data-edit-val="${jadeVal}">${jadeVal}</span></div>
+                <input type="range" class="status-slider dark" data-slider-col="jadedness" min="-500" max="1500" step="25" value="${jadeVal}" style="--pct:${jadePct}%" />
               </div>
               ${(p.attributes.Hidden || []).map((a) => `
                 <div class="attr-row">
@@ -818,6 +871,35 @@
     // Wire inline editors
     body.querySelectorAll("[data-edit-col]").forEach((el) => {
       el.onclick = () => startInlineEdit(el, p.unique_id, el.dataset.editCol, el.dataset.editVal, el.dataset.wide === "1");
+    });
+    // Wire draggable live-status sliders
+    body.querySelectorAll("[data-slider-col]").forEach((slider) => {
+      const col = slider.dataset.sliderCol;
+      const lbl = body.querySelector(`[data-slider-val="${col}"]`);
+      const min = Number(slider.min);
+      const max = Number(slider.max);
+      slider.oninput = () => {
+        const v = Number(slider.value);
+        const pct = Math.max(0, Math.min(100, ((v - min) / (max - min)) * 100));
+        slider.style.setProperty("--pct", `${pct.toFixed(1)}%`);
+        if (lbl) {
+          lbl.textContent = (col === "condition" || col === "match_sharpness") ? v.toLocaleString() : String(v);
+          lbl.dataset.editVal = String(v);
+        }
+      };
+      slider.onchange = async () => {
+        const v = Number(slider.value);
+        try {
+          const res = await apiPost(`/api/player/${p.unique_id}/edit`, { column: col, value: v });
+          if (!res.ok) { toast(res.error || "Edit failed", "error"); renderActiveView(); return; }
+          renderStatus(res.status);
+          toast(res.message, res.in_game ? "ok" : "info");
+          if (res.player) renderPlayerPage(res.player, tab);
+        } catch (err) {
+          toast(err.message, "error");
+          renderActiveView();
+        }
+      };
     });
     // Wire club / nation links
     body.querySelectorAll("[data-open-club]").forEach((el) => {
@@ -1133,7 +1215,14 @@
           </div>
         </div>
         <div class="card">
-          <div class="card-head"><span>Squad (${c.squad.length} players)</span><span style="color:var(--muted)">Click header to sort · Click row to open</span></div>
+          <div class="card-head">
+            <span>
+              Squad (${c.squad.length} players)
+              ${c.loan_in_count ? `<span class="loan-legend"><span class="loan-dot in"></span>Loan In (${c.loan_in_count})</span>` : ""}
+              ${c.loan_out_count ? `<span class="loan-legend"><span class="loan-dot out"></span>Loan Out (${c.loan_out_count})</span>` : ""}
+            </span>
+            <span style="color:var(--muted)">Click header to sort · Click row to open</span>
+          </div>
           <div class="table-wrap" id="clubSquadTable"></div>
         </div>
       `;
@@ -1184,7 +1273,7 @@
       <div class="entity-card">
         <div class="entity-top">
           <div class="entity-id">
-            <div class="avatar"><span class="avatar-init">${esc(initials)}</span></div>
+            ${avatarHTML("club", c.id || c.raw_name || c.name, initials)}
             <div>
               <div class="entity-name">${esc(c.name)}</div>
               <div class="entity-tags">
@@ -1225,20 +1314,53 @@
     });
 
     if (sub === "squad") {
+      const ratingBadgeClass = (v) => {
+        const n = Number(v) || 0;
+        if (n >= 80) return "n-elite";
+        if (n >= 72) return "n-high";
+        if (n >= 62) return "n-mid";
+        return "n-low";
+      };
       renderSortableTable("clubSquadTable", [
-        { key: "name", label: "Player", render: (r) => `<span class="link-ink">${esc(r.name)}</span>` },
-        { key: "pos", label: "Pos" },
+        {
+          key: "name",
+          label: "Player",
+          render: (r) => {
+            const av = squadAvatarHTML("player", r.unique_id, r.name);
+            if (r.loan_status === "in") {
+              return `<span class="squad-cell-player">${av}<span><span class="link-ink pname-loan-in">${esc(r.name)}</span><span class="loan-pill in" title="On loan from ${esc(r.loan_from)}">IN · ${esc(r.loan_from || "Loan")}</span></span></span>`;
+            }
+            if (r.loan_status === "out") {
+              return `<span class="squad-cell-player">${av}<span><span class="link-ink pname-loan-out">${esc(r.name)}</span><span class="loan-pill out" title="Loaned out to ${esc(r.loan_to)}">OUT · ${esc(r.loan_to || "Loan")}</span></span></span>`;
+            }
+            return `<span class="squad-cell-player">${av}<span class="link-ink">${esc(r.name)}</span></span>`;
+          },
+        },
+        { key: "pos", sortKey: "pos_rank", defaultAsc: true, label: "Pos" },
         { key: "age", label: "Age" },
+        {
+          key: "rating",
+          label: "Rating",
+          render: (r) => r.rating != null
+            ? `<span class="num-badge ${ratingBadgeClass(r.rating)}">${Number(r.rating).toFixed(1)}%</span>`
+            : "—",
+        },
         { key: "ca", label: "CA", render: (r) => `<strong>${r.ca}</strong>` },
         { key: "pa", label: "PA" },
         { key: "morale", label: "Morale" },
         { key: "condition_pct", label: "Cond", render: (r) => `${r.condition_pct}%` },
-        { key: "wage_raw", label: "Wage", render: (r) => esc(r.wage) },
+        { key: "value_raw", label: "Value", render: (r) => esc(r.value) },
         { key: "contract", label: "Contract" },
-      ], c.squad, (r) => openEntity("player", r.unique_id, r.name));
+      ], c.squad, (r) => openEntity("player", r.unique_id, r.name), {
+        rowClass: (r) => r.loan_status === "in" ? "row-loan-in" : (r.loan_status === "out" ? "row-loan-out" : ""),
+      });
     } else if (sub === "staff") {
       renderSortableTable("clubStaffTable", [
-        { key: "name", label: "Name", render: (r) => `<span class="link-ink">${esc(r.name)}</span>` },
+        {
+          key: "name",
+          label: "Name",
+          render: (r) => `<span class="squad-cell-player">${squadAvatarHTML("staff", r.unique_id, r.name)}<span class="link-ink">${esc(r.name)}</span></span>`,
+        },
         { key: "job", label: "Job" },
         { key: "age", label: "Age" },
         { key: "nationality", label: "Nationality" },
@@ -1248,10 +1370,74 @@
     }
   }
 
+  function startStaffInlineEdit(el, uid, column, currentValue, wide = false) {
+    if (el.querySelector("input")) return;
+    const origHTML = el.innerHTML;
+    const input = document.createElement("input");
+    input.className = "inline-edit" + (wide ? " wide" : "");
+    input.value = currentValue ?? "";
+    el.innerHTML = "";
+    el.appendChild(input);
+    input.focus();
+    input.select();
+
+    let committed = false;
+    async function finish(save) {
+      if (committed) return;
+      committed = true;
+      const next = input.value.trim();
+      if (!save || next === String(currentValue ?? "")) {
+        el.innerHTML = origHTML;
+        return;
+      }
+      try {
+        const res = await apiPost(`/api/staff/${uid}/edit`, { column, value: next });
+        if (!res.ok) {
+          toast(res.error || "Staff edit failed", "error");
+          el.innerHTML = origHTML;
+          return;
+        }
+        renderStatus(res.status);
+        toast(res.message, res.in_game ? "ok" : "info");
+        if (res.staff) renderStaffPage(res.staff);
+      } catch (err) {
+        toast(err.message, "error");
+        el.innerHTML = origHTML;
+      }
+    }
+    input.onkeydown = (e) => {
+      if (e.key === "Enter") { e.preventDefault(); finish(true); }
+      if (e.key === "Escape") { e.preventDefault(); finish(false); }
+    };
+    input.onblur = () => finish(true);
+  }
+
   // ---- STAFF VIEW ----
   function renderStaffPage(s) {
     const body = document.getElementById("centerBody");
     const initials = (s.name || "ST").split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
+    const attrs = s.attributes || {};
+    const liveOk = !!s.live_attrs_available;
+
+    const renderStaffGroup = (title, list) => `
+      <div class="card">
+        <div class="card-head">
+          <span>${esc(title)}</span>
+          <span style="color:var(--faint)">${liveOk ? "Click to edit" : "Live RAM"}</span>
+        </div>
+        <div class="card-body">
+          ${(list || []).map((a) => `
+            <div class="attr-row">
+              <span class="attr-name">${esc(a.label)}</span>
+              ${a.value != null
+                ? `<span class="num-badge editable ${numClass(a.value)}" data-sedit-col="${esc(a.column)}" data-sedit-val="${a.value}">${a.value}</span>`
+                : `<span class="num-badge editable n-low" data-sedit-col="${esc(a.column)}" data-sedit-val="15">—</span>`}
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    `;
+
     body.innerHTML = `
       <div class="entity-card">
         <div class="entity-top">
@@ -1264,19 +1450,107 @@
                 <span class="etag clickable" data-open-club="${esc(s.club_id || s.club_raw)}">${esc(s.club)}</span>
                 <span class="etag clickable" data-open-nation="${esc(s.nationality)}">${esc(s.nationality)}</span>
                 <span class="etag">${s.age || "—"} Years</span>
+                ${liveOk
+                  ? `<span class="etag lime">● Live Staff Attributes</span>`
+                  : `<span class="etag">Snapshot · Attach FM27 for Live Attributes</span>`}
               </div>
             </div>
           </div>
-          <div class="kpi-trend" style="font-size:12px;padding:5px 12px;">CA ${s.ca} / PA ${s.pa}</div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            ${!liveOk ? `<button class="mini-btn" id="btnStaffAttach">Load Game →</button>` : ""}
+            <button class="mag-cta mag-cta-sm magnetic" id="btnStaffMaxAll" title="Set CA/PA 200 and live attributes to 20">
+              <span>Max Staff 20</span><span class="orb">★</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="kpi-row">
+          <div class="kpi">
+            <span class="kpi-label">Current / Potential Ability (click to edit)</span>
+            <div class="kpi-val-row">
+              <span class="kpi-val">
+                <span class="meter-val" data-sedit-col="ca" data-sedit-val="${s.ca}">${s.ca}</span> /
+                <span class="meter-val" data-sedit-col="pa" data-sedit-val="${s.pa}">${s.pa}</span>
+              </span>
+              <span class="kpi-trend">${s.ca >= 160 ? "World Class" : s.ca >= 130 ? "Elite" : "Staff"}</span>
+            </div>
+          </div>
+          <div class="kpi">
+            <span class="kpi-label">Current Reputation</span>
+            <div class="kpi-val-row">
+              <span class="kpi-val"><span class="meter-val" data-sedit-col="current_reputation" data-sedit-val="${s.current_reputation || 0}">${s.current_reputation ? s.current_reputation.toLocaleString() : "—"}</span></span>
+              <span class="kpi-trend">0–10,000</span>
+            </div>
+          </div>
+          <div class="kpi">
+            <span class="kpi-label">Home / World Rep</span>
+            <div class="kpi-val-row">
+              <span class="kpi-val">
+                <span class="meter-val" data-sedit-col="home_reputation" data-sedit-val="${s.home_reputation || 0}">${s.home_reputation || "—"}</span> /
+                <span class="meter-val" data-sedit-col="world_reputation" data-sedit-val="${s.world_reputation || 0}">${s.world_reputation || "—"}</span>
+              </span>
+            </div>
+          </div>
+          <div class="kpi">
+            <span class="kpi-label">Age &amp; Role</span>
+            <div class="kpi-val-row">
+              <span class="kpi-val"><span class="meter-val" data-sedit-col="age" data-sedit-val="${s.age || 40}">${s.age || "—"}</span>y</span>
+              <span class="kpi-trend">${esc(s.job)}</span>
+            </div>
+          </div>
         </div>
       </div>
-      <div class="grid-2">
+
+      <div class="grid-4">
+        ${renderStaffGroup("Coaching", attrs.Coaching)}
+        ${renderStaffGroup("Mental", attrs.Mental)}
+        ${renderStaffGroup("Scouting & Medical", attrs["Scouting & Medical"])}
+        <div style="display:flex;flex-direction:column;gap:12px;">
+          ${renderStaffGroup("Goalkeeping", attrs.Goalkeeping)}
+          ${renderStaffGroup("Personality", attrs.Personality)}
+        </div>
+      </div>
+
+      ${(() => {
+        const sr = s.star_ratings || {};
+        if (!sr.live_stars) return "";
+        const cats = state.boot?.staff_categories || [];
+        const coachList = cats.filter((c) => c.group === "Coaching");
+        const roleList = cats.filter((c) => c.group === "Specialist");
+        const renderItem = (c, val) => `
+          <div class="staff-star-item ${val >= 4.5 ? "elite" : val >= 4.0 ? "high" : ""}">
+            <span class="staff-star-name">${esc(c.label)}</span>
+            <span class="star-pill ${val >= 4.5 ? "elite" : val >= 4.0 ? "high" : ""}">★ ${Number(val || 0).toFixed(1)}</span>
+          </div>
+        `;
+        return `
+          <div class="card" style="margin-top:12px;">
+            <div class="card-head">
+              <span>FM Coaching &amp; Role Star Ratings (DDM ${sr.ddm ?? "—"} / 60)</span>
+              <span class="etag lime">Best: ${esc(sr.category_label || "")} ★ ${Number(sr.stars || 0).toFixed(1)}</span>
+            </div>
+            <div class="card-body">
+              <div class="staff-star-section-lbl">Coaching Training Stars</div>
+              <div class="staff-star-grid">
+                ${coachList.map((c) => renderItem(c, (sr.coach_stars || {})[c.key])).join("")}
+              </div>
+              <div class="staff-star-section-lbl" style="margin-top:10px;">Specialist Staff Role Stars</div>
+              <div class="staff-star-grid">
+                ${roleList.map((c) => renderItem(c, (sr.role_stars || {})[c.key])).join("")}
+              </div>
+            </div>
+          </div>
+        `;
+      })()}
+
+      <div class="grid-2" style="margin-top:12px;">
         <div class="card">
-          <div class="card-head"><span>Staff Details</span></div>
+          <div class="card-head"><span>Staff Details</span><span style="color:var(--faint)">Click to edit</span></div>
           <div class="card-body">
             <div class="attr-row"><span class="attr-name">Unique ID</span><code>${s.unique_id}</code></div>
             <div class="attr-row"><span class="attr-name">Club</span><span class="link-ink" data-open-club="${esc(s.club_id || s.club_raw)}">${esc(s.club)}</span></div>
-            <div class="attr-row"><span class="attr-name">Role</span><strong>${esc(s.job)}</strong></div>
+            <div class="attr-row"><span class="attr-name">Role / Job</span><span class="meter-val" data-sedit-col="job" data-sedit-val="${esc(s.job)}" data-wide="1">${esc(s.job)}</span></div>
+            <div class="attr-row"><span class="attr-name">Age</span><span class="meter-val" data-sedit-col="age" data-sedit-val="${s.age || 40}">${s.age || "—"}</span></div>
             <div class="attr-row"><span class="attr-name">Date of Birth</span><span>${esc(s.dob)}</span></div>
           </div>
         </div>
@@ -1285,7 +1559,10 @@
           <div class="card-body">
             ${s.colleagues.slice(0, 10).map((col) => `
               <div class="attr-row">
-                <span class="link-ink" data-open-staff="${col.unique_id}">${esc(col.name)} — ${esc(col.job)}</span>
+                <span class="squad-cell-player">
+                  ${squadAvatarHTML("staff", col.unique_id, col.name)}
+                  <span class="link-ink" data-open-staff="${col.unique_id}">${esc(col.name)} — ${esc(col.job)}</span>
+                </span>
                 <span class="num-badge n-mid">${col.ca || "—"}</span>
               </div>
             `).join("") || '<div class="empty-note">No colleagues listed.</div>'}
@@ -1293,6 +1570,29 @@
         </div>
       </div>
     `;
+    body.querySelectorAll("[data-sedit-col]").forEach((el) => {
+      el.onclick = () => startStaffInlineEdit(el, s.unique_id, el.dataset.seditCol, el.dataset.seditVal, el.dataset.wide === "1");
+    });
+    const maxBtn = document.getElementById("btnStaffMaxAll");
+    if (maxBtn) {
+      maxBtn.onclick = async () => {
+        try {
+          const res = await apiPost(`/api/staff/${s.unique_id}/preset`, { preset: "max_staff" });
+          renderStatus(res.status);
+          toast(res.message || "Staff updated", res.in_game ? "ok" : "info");
+          if (res.staff) renderStaffPage(res.staff);
+        } catch (err) {
+          toast(err.message, "error");
+        }
+      };
+    }
+    const attachBtn = document.getElementById("btnStaffAttach");
+    if (attachBtn) {
+      attachBtn.onclick = async () => {
+        await doAttach(false);
+        renderActiveView();
+      };
+    }
     body.querySelectorAll("[data-open-club]").forEach((el) => {
       el.onclick = () => { if (el.dataset.openClub) openEntity("club", el.dataset.openClub, s.club); };
     });
@@ -1302,6 +1602,7 @@
     body.querySelectorAll("[data-open-nation]").forEach((el) => {
       el.onclick = () => { if (el.dataset.openNation && el.dataset.openNation !== "—") openEntity("nation", el.dataset.openNation, el.dataset.openNation); };
     });
+    bindMagnetic(body);
   }
 
   // ---- NATION VIEW ----
@@ -1312,7 +1613,7 @@
       <div class="entity-card">
         <div class="entity-top">
           <div class="entity-id">
-            <div class="avatar">${esc((n.name || "NA").slice(0, 2).toUpperCase())}</div>
+            ${avatarHTML("nation", n.name, (n.name || "NA").slice(0, 2).toUpperCase())}
             <div>
               <div class="entity-name">${esc(n.name)}</div>
               <div class="entity-tags">
@@ -1337,14 +1638,20 @@
     });
     if (sub === "clubs") {
       renderSortableTable("nationTableHost", [
-        { key: "name", label: "Club", render: (r) => `<span class="link-ink">${esc(r.name)}</span>` },
+        {
+          key: "name", label: "Club",
+          render: (r) => `<div class="squad-cell-player">${squadAvatarHTML("club", r.id || r.raw_name || r.name, r.name)}<span class="link-ink">${esc(r.name)}</span></div>`,
+        },
         { key: "competition", label: "Competition" },
         { key: "reputation", label: "Reputation" },
         { key: "balance", label: "Balance" },
       ], n.clubs, (r) => openEntity("club", r.id, r.name));
     } else if (sub === "staff") {
       renderSortableTable("nationTableHost", [
-        { key: "name", label: "Name", render: (r) => `<span class="link-ink">${esc(r.name)}</span>` },
+        {
+          key: "name", label: "Name",
+          render: (r) => `<div class="squad-cell-player">${squadAvatarHTML("staff", r.unique_id, r.name)}<span class="link-ink">${esc(r.name)}</span></div>`,
+        },
         { key: "club", label: "Club" },
         { key: "job", label: "Job" },
         { key: "age", label: "Age" },
@@ -1352,7 +1659,10 @@
       ], n.staff, (r) => openEntity("staff", r.unique_id, r.name));
     } else {
       renderSortableTable("nationTableHost", [
-        { key: "name", label: "Player", render: (r) => `<span class="link-ink">${esc(r.name)}</span>` },
+        {
+          key: "name", label: "Player",
+          render: (r) => `<div class="squad-cell-player">${squadAvatarHTML("player", r.unique_id, r.name)}<span class="link-ink">${esc(r.name)}</span></div>`,
+        },
         { key: "club", label: "Club" },
         { key: "pos", label: "Pos" },
         { key: "age", label: "Age" },
@@ -1364,18 +1674,60 @@
   }
 
   // ---- PEOPLE SEARCH ----
+  function renderStarBadge(stars, live, catLabel = "") {
+    const val = Number(stars || 0);
+    const full = Math.floor(val);
+    const half = (val - full) >= 0.45 ? 1 : 0;
+    const glyph = "★".repeat(Math.max(0, Math.min(5, full))) + (half ? "½" : "");
+    const cls = !live ? "est" : (val >= 4.5 ? "elite" : val >= 4.0 ? "high" : "");
+    const prefix = live ? "" : "~";
+    const tip = live
+      ? `${catLabel || "FM Star Rating"}: ${val.toFixed(1)} / 5.0 (live attributes)`
+      : `Estimated from CA (${val.toFixed(1)}★) — press Load Game for exact FM attribute stars`;
+    return `
+      <span class="star-cell" title="${esc(tip)}">
+        <span class="star-pill ${cls}">${prefix}${glyph} ${val.toFixed(1)}</span>
+        ${catLabel ? `<span class="star-cat-sub">${esc(catLabel)}</span>` : ""}
+      </span>
+    `;
+  }
+
   async function renderSearchPage() {
     const body = document.getElementById("centerBody");
     const st = state.searchState;
+    const attrGroups = state.boot?.attribute_groups || [];
+    const attrLabelByCol = {};
+    for (const g of attrGroups) {
+      for (const f of (g.fields || [])) attrLabelByCol[f.column] = f.label;
+    }
+
+    const attrsParam = (st.attr_filters || [])
+      .map((f) => `${f.col}:${f.min || ""}:${f.max || ""}`)
+      .join(",");
+
     const qs = new URLSearchParams({
       scope: st.scope, q: st.q, pos: st.pos, job: st.job,
-      min_age: st.min_age, max_age: st.max_age, min_ca: st.min_ca,
+      min_age: st.min_age, max_age: st.max_age,
+      min_ca: st.min_ca, max_ca: st.max_ca,
+      min_pa: st.min_pa, max_pa: st.max_pa,
+      min_pos_rating: st.min_pos_rating,
+      attrs: attrsParam,
+      staff_cat: st.staff_cat,
+      min_stars: st.min_stars,
       listed: st.listed ? "1" : "", limit: "250",
     });
     const data = await apiGet(`/api/search?${qs.toString()}`);
 
     const posOptions = ["Any", ...(state.boot?.positions || []).map((p) => p.label)];
     const jobOptions = ["Any", ...(state.boot?.staff_jobs || [])];
+    const staffCats = state.boot?.staff_categories || [];
+    const coachCats = staffCats.filter((c) => c.group === "Coaching");
+    const roleCats = staffCats.filter((c) => c.group === "Specialist");
+
+    const activeGroupObj = attrGroups.find((g) => g.name === st.attr_group) || attrGroups[0] || { name: "Physical", fields: [] };
+    if (activeGroupObj && !activeGroupObj.fields.some((f) => f.column === st.attr_col)) {
+      st.attr_col = activeGroupObj.fields[0]?.column || "pace";
+    }
 
     body.innerHTML = `
       <div class="entity-card">
@@ -1385,25 +1737,78 @@
               <div class="seg-item ${st.scope === k ? "active" : ""}" data-scope="${k}">${lbl}</div>
             `).join("")}
           </div>
-          <span style="font-size:11.5px;color:var(--muted);">${data.count} results</span>
+          <span style="font-size:11.5px;color:var(--muted);">
+            ${data.count} results${st.scope === "staff" && !state.status?.attached ? " · Attach FM27 for exact ★ ratings" : ""}
+          </span>
         </div>
+
         <div class="filter-bar">
-          <input id="srchQ" class="filter-input" style="min-width:200px;" placeholder="Name or club…" value="${esc(st.q)}" />
+          <input id="srchQ" class="filter-input" style="min-width:175px;" placeholder="Name or club…" value="${esc(st.q)}" />
           ${st.scope === "players" ? `
-            <select id="srchPos" class="mini-select">${posOptions.map((o) => `<option ${st.pos === o ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>
-            <input id="srchMinAge" class="filter-input filter-sm" placeholder="Min Age" value="${esc(st.min_age)}" />
-            <input id="srchMaxAge" class="filter-input filter-sm" placeholder="Max Age" value="${esc(st.max_age)}" />
-            <input id="srchMinCa" class="filter-input filter-sm" placeholder="Min CA" value="${esc(st.min_ca)}" />
-            <label class="filter-check"><input type="checkbox" id="srchListed" ${st.listed ? "checked" : ""} /> Listed only</label>
+            <select id="srchPos" class="mini-select" title="Filter position & score at this exact position">${posOptions.map((o) => `<option ${st.pos === o ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>
+            <input id="srchMinPosRat" class="filter-input filter-sm" style="width:86px;" placeholder="Min Pos%" title="Minimum rating % at selected position (e.g. 75)" value="${esc(st.min_pos_rating)}" />
+            <span class="filter-grp-lbl">Age</span>
+            <input id="srchMinAge" class="filter-input filter-xs" placeholder="Min" value="${esc(st.min_age)}" />
+            <input id="srchMaxAge" class="filter-input filter-xs" placeholder="Max" value="${esc(st.max_age)}" />
+            <span class="filter-grp-lbl">CA</span>
+            <input id="srchMinCa" class="filter-input filter-xs" placeholder="Min" value="${esc(st.min_ca)}" />
+            <input id="srchMaxCa" class="filter-input filter-xs" placeholder="Max" value="${esc(st.max_ca)}" />
+            <span class="filter-grp-lbl">PA</span>
+            <input id="srchMinPa" class="filter-input filter-xs" placeholder="Min" value="${esc(st.min_pa)}" />
+            <input id="srchMaxPa" class="filter-input filter-xs" placeholder="Max" value="${esc(st.max_pa)}" />
+            <label class="filter-check"><input type="checkbox" id="srchListed" ${st.listed ? "checked" : ""} /> Listed</label>
           ` : st.scope === "staff" ? `
-            <select id="srchJob" class="mini-select">${jobOptions.map((o) => `<option ${st.job === o ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>
-            <input id="srchMinAge" class="filter-input filter-sm" placeholder="Min Age" value="${esc(st.min_age)}" />
-            <input id="srchMaxAge" class="filter-input filter-sm" placeholder="Max Age" value="${esc(st.max_age)}" />
-            <input id="srchMinCa" class="filter-input filter-sm" placeholder="Min CA" value="${esc(st.min_ca)}" />
+            <select id="srchJob" class="mini-select" title="Staff job">${jobOptions.map((o) => `<option ${st.job === o ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>
+            <select id="srchStaffCat" class="mini-select" title="FM Star Rating Category">
+              <option value="" ${!st.staff_cat ? "selected" : ""}>★ Best Role / Coaching</option>
+              <optgroup label="Coaching Training Stars">
+                ${coachCats.map((c) => `<option value="${esc(c.key)}" ${st.staff_cat === c.key ? "selected" : ""}>${esc(c.label)} (${esc(c.zh)})</option>`).join("")}
+              </optgroup>
+              <optgroup label="Specialist Staff Stars">
+                ${roleCats.map((c) => `<option value="${esc(c.key)}" ${st.staff_cat === c.key ? "selected" : ""}>${esc(c.label)} (${esc(c.zh)})</option>`).join("")}
+              </optgroup>
+            </select>
+            <select id="srchMinStars" class="mini-select" title="Minimum star rating">
+              <option value="" ${!st.min_stars ? "selected" : ""}>Min ★ Any</option>
+              ${["3.0","3.5","4.0","4.5","5.0"].map((v) => `<option value="${v}" ${st.min_stars === v ? "selected" : ""}>≥ ${v} ★</option>`).join("")}
+            </select>
+            <span class="filter-grp-lbl">CA</span>
+            <input id="srchMinCa" class="filter-input filter-xs" placeholder="Min" value="${esc(st.min_ca)}" />
+            <input id="srchMaxCa" class="filter-input filter-xs" placeholder="Max" value="${esc(st.max_ca)}" />
+            <span class="filter-grp-lbl">PA</span>
+            <input id="srchMinPa" class="filter-input filter-xs" placeholder="Min" value="${esc(st.min_pa)}" />
+            <input id="srchMaxPa" class="filter-input filter-xs" placeholder="Max" value="${esc(st.max_pa)}" />
+            <span class="filter-grp-lbl">Age</span>
+            <input id="srchMinAge" class="filter-input filter-xs" placeholder="Min" value="${esc(st.min_age)}" />
+            <input id="srchMaxAge" class="filter-input filter-xs" placeholder="Max" value="${esc(st.max_age)}" />
           ` : ""}
           <button class="mini-btn mini-btn-dark" id="btnRunSearch">Search</button>
           <button class="mini-btn" id="btnResetSearch">Reset</button>
         </div>
+
+        ${st.scope === "players" && attrGroups.length ? `
+          <div class="filter-bar filter-bar-attr">
+            <span class="filter-grp-lbl">Attribute Filter</span>
+            <select id="srchAttrGroup" class="mini-select" title="Level 1: Attribute Component">
+              ${attrGroups.map((g) => `<option value="${esc(g.name)}" ${activeGroupObj.name === g.name ? "selected" : ""}>${esc(g.name)}</option>`).join("")}
+            </select>
+            <select id="srchAttrCol" class="mini-select" title="Level 2: Specific Attribute">
+              ${(activeGroupObj.fields || []).map((f) => `<option value="${esc(f.column)}" ${st.attr_col === f.column ? "selected" : ""}>${esc(f.label)}</option>`).join("")}
+            </select>
+            <input id="srchAttrMin" class="filter-input filter-xs" placeholder="Min" title="1-20" value="${esc(st.attr_min)}" />
+            <span class="filter-grp-lbl">–</span>
+            <input id="srchAttrMax" class="filter-input filter-xs" placeholder="Max" title="1-20" value="${esc(st.attr_max)}" />
+            <button class="mini-btn" id="btnAddAttrFilter">+ Add</button>
+            <div class="attr-chip-list" id="srchAttrChips">
+              ${(st.attr_filters || []).map((f, i) => `
+                <span class="attr-chip">
+                  <span>${esc(f.label || attrLabelByCol[f.col] || f.col)}: ${esc(f.min || "1")}–${esc(f.max || "20")}</span>
+                  <button data-rm-af="${i}" title="Remove filter">×</button>
+                </span>
+              `).join("")}
+            </div>
+          </div>
+        ` : ""}
       </div>
       <div class="card"><div class="table-wrap" id="searchTableHost"></div></div>
     `;
@@ -1411,42 +1816,125 @@
     body.querySelectorAll("#searchScopeNav .seg-item").forEach((el) => {
       el.onclick = () => { st.scope = el.dataset.scope; renderSearchPage(); };
     });
+
+    // Two-level cascading attribute selector (Component -> Attribute)
+    const grpSel = document.getElementById("srchAttrGroup");
+    const colSel = document.getElementById("srchAttrCol");
+    if (grpSel && colSel) {
+      grpSel.onchange = () => {
+        st.attr_group = grpSel.value;
+        const grp = attrGroups.find((g) => g.name === grpSel.value) || attrGroups[0];
+        const fields = grp?.fields || [];
+        st.attr_col = fields[0]?.column || "";
+        colSel.innerHTML = fields.map((f) => `<option value="${esc(f.column)}">${esc(f.label)}</option>`).join("");
+      };
+      colSel.onchange = () => { st.attr_col = colSel.value; };
+    }
+
+    const pushPendingAttrFilter = () => {
+      const cSel = document.getElementById("srchAttrCol");
+      const aMin = document.getElementById("srchAttrMin");
+      const aMax = document.getElementById("srchAttrMax");
+      if (!cSel || !aMin || !aMax) return false;
+      const col = cSel.value;
+      const lo = aMin.value.trim();
+      const hi = aMax.value.trim();
+      if (!col || (!lo && !hi)) return false;
+      const idx = st.attr_filters.findIndex((x) => x.col === col);
+      const item = { col, label: attrLabelByCol[col] || col, min: lo, max: hi };
+      if (idx >= 0) st.attr_filters[idx] = item;
+      else st.attr_filters.push(item);
+      st.attr_min = "";
+      st.attr_max = "";
+      aMin.value = "";
+      aMax.value = "";
+      return true;
+    };
+
+    const addAttrBtn = document.getElementById("btnAddAttrFilter");
+    if (addAttrBtn) {
+      addAttrBtn.onclick = () => {
+        if (pushPendingAttrFilter()) renderSearchPage();
+        else toast("Enter a Min or Max value (1–20) first", "info");
+      };
+    }
+    body.querySelectorAll("[data-rm-af]").forEach((btn) => {
+      btn.onclick = () => {
+        st.attr_filters.splice(Number(btn.dataset.rmAf), 1);
+        renderSearchPage();
+      };
+    });
+
     const run = () => {
       st.q = document.getElementById("srchQ").value.trim();
       const posEl = document.getElementById("srchPos");
       const jobEl = document.getElementById("srchJob");
+      const catEl = document.getElementById("srchStaffCat");
+      const starsEl = document.getElementById("srchMinStars");
       if (posEl) st.pos = posEl.value;
       if (jobEl) st.job = jobEl.value;
-      const mi = document.getElementById("srchMinAge");
-      const ma = document.getElementById("srchMaxAge");
-      const mc = document.getElementById("srchMinCa");
+      if (catEl) st.staff_cat = catEl.value;
+      if (starsEl) st.min_stars = starsEl.value;
+      const readVal = (id, key) => {
+        const el = document.getElementById(id);
+        if (el) st[key] = el.value.trim();
+      };
+      readVal("srchMinAge", "min_age");
+      readVal("srchMaxAge", "max_age");
+      readVal("srchMinCa", "min_ca");
+      readVal("srchMaxCa", "max_ca");
+      readVal("srchMinPa", "min_pa");
+      readVal("srchMaxPa", "max_pa");
+      readVal("srchMinPosRat", "min_pos_rating");
       const ls = document.getElementById("srchListed");
-      if (mi) st.min_age = mi.value.trim();
-      if (ma) st.max_age = ma.value.trim();
-      if (mc) st.min_ca = mc.value.trim();
       if (ls) st.listed = ls.checked;
+      if (st.scope === "players") pushPendingAttrFilter();
       renderSearchPage();
     };
     document.getElementById("btnRunSearch").onclick = run;
-    document.getElementById("srchQ").onkeydown = (e) => { if (e.key === "Enter") run(); };
+    body.querySelectorAll(".filter-input").forEach((inp) => {
+      inp.onkeydown = (e) => { if (e.key === "Enter") run(); };
+    });
+    document.getElementById("srchStaffCat")?.addEventListener("change", run);
+    document.getElementById("srchMinStars")?.addEventListener("change", run);
+    document.getElementById("srchPos")?.addEventListener("change", run);
     document.getElementById("btnResetSearch").onclick = () => {
-      Object.assign(st, { q: "", pos: "Any", job: "Any", min_age: "", max_age: "", min_ca: "", listed: false });
+      Object.assign(st, {
+        q: "", pos: "Any", job: "Any",
+        min_age: "", max_age: "", min_ca: "", max_ca: "", min_pa: "", max_pa: "",
+        min_pos_rating: "", listed: false,
+        attr_min: "", attr_max: "", attr_filters: [],
+        staff_cat: "", min_stars: "",
+      });
       renderSearchPage();
     };
 
     if (st.scope === "staff") {
       renderSortableTable("searchTableHost", [
-        { key: "name", label: "Name", render: (r) => `<span class="link-ink">${esc(r.name)}</span>` },
+        {
+          key: "name", label: "Staff",
+          render: (r) => `<div class="squad-cell-player">${squadAvatarHTML("staff", r.unique_id, r.name)}<span class="link-ink">${esc(r.name)}</span></div>`,
+        },
         { key: "club", label: "Club" },
         { key: "job", label: "Job" },
+        {
+          key: "stars", sortKey: "star_score", label: st.staff_cat ? "Category ★" : "FM ★ Rating",
+          render: (r) => renderStarBadge(r.stars, r.live_stars, r.star_category_label),
+        },
+        {
+          key: "star_summary", label: "Key Attributes",
+          render: (r) => `<span style="font-size:11px;color:var(--muted);">${esc(r.star_summary || "—")}</span>`,
+        },
         { key: "age", label: "Age" },
-        { key: "nationality", label: "Nationality" },
         { key: "ca", label: "CA", render: (r) => `<strong>${r.ca}</strong>` },
         { key: "pa", label: "PA" },
       ], data.rows, (r) => openEntity("staff", r.unique_id, r.name));
     } else if (st.scope === "clubs") {
       renderSortableTable("searchTableHost", [
-        { key: "name", label: "Club", render: (r) => `<span class="link-ink">${esc(r.name)}</span>` },
+        {
+          key: "name", label: "Club",
+          render: (r) => `<div class="squad-cell-player">${squadAvatarHTML("club", r.id || r.raw_name || r.name, r.name)}<span class="link-ink">${esc(r.name)}</span></div>`,
+        },
         { key: "nation", label: "Nation" },
         { key: "competition", label: "Competition" },
         { key: "reputation", label: "Reputation" },
@@ -1455,24 +1943,56 @@
       ], data.rows, (r) => openEntity("club", r.id, r.name));
     } else if (st.scope === "nations") {
       renderSortableTable("searchTableHost", [
-        { key: "name", label: "Nation", render: (r) => `<span class="link-ink">${esc(r.name)}</span>` },
+        {
+          key: "name", label: "Nation",
+          render: (r) => `<div class="squad-cell-player">${squadAvatarHTML("nation", r.name, r.name)}<span class="link-ink">${esc(r.name)}</span></div>`,
+        },
         { key: "players", label: "Players" },
         { key: "clubs", label: "Clubs" },
         { key: "staff", label: "Staff" },
         { key: "best_ca", label: "Top CA" },
       ], data.rows, (r) => openEntity("nation", r.name, r.name));
     } else {
-      renderSortableTable("searchTableHost", [
-        { key: "name", label: "Player", render: (r) => `<span class="link-ink">${esc(r.name)}</span>` },
+      const hasPos = st.pos && st.pos !== "Any";
+      const cols = [
+        {
+          key: "name", label: "Player",
+          render: (r) => `<div class="squad-cell-player">${squadAvatarHTML("player", r.unique_id, r.name)}<span class="link-ink">${esc(r.name)}</span></div>`,
+        },
         { key: "club", label: "Club" },
-        { key: "pos", label: "Pos" },
+        { key: "pos", sortKey: "pos_rank", defaultAsc: true, label: "Pos" },
+        {
+          key: "pos_rating",
+          label: hasPos ? `${st.pos} Rating` : "Rating",
+          render: (r) => {
+            const v = Number(r.pos_rating || 0);
+            const cls = v >= 80 ? "n-elite" : v >= 72 ? "n-high" : v >= 62 ? "n-mid" : "n-low";
+            const sub = hasPos
+              ? `${r.pos_role || ""}${r.pos_comp ? ` · ${r.pos_comp}/20` : ""}`
+              : (r.pos_role || "");
+            return `<div class="pos-rating-cell"><span class="num-badge ${cls}">${v.toFixed(1)}%</span>${sub ? `<span class="pos-rating-sub">${esc(sub)}</span>` : ""}</div>`;
+          },
+        },
+      ];
+      if ((st.attr_filters || []).length) {
+        cols.push({
+          key: "matched_attrs",
+          label: "Filtered Attrs",
+          render: (r) => {
+            const m = r.matched_attrs || {};
+            const txt = (st.attr_filters || []).map((f) => `${f.label || f.col} ${m[f.col] ?? "—"}`).join(" · ");
+            return `<span style="font-size:11px;font-weight:600;color:var(--ink-2);">${esc(txt)}</span>`;
+          },
+        });
+      }
+      cols.push(
         { key: "age", label: "Age" },
         { key: "ca", label: "CA", render: (r) => `<strong>${r.ca}</strong>` },
         { key: "pa", label: "PA" },
         { key: "value_raw", label: "Value", render: (r) => esc(r.value) },
-        { key: "wage_raw", label: "Wage", render: (r) => esc(r.wage) },
         { key: "contract", label: "Contract" },
-      ], data.rows, (r) => openEntity("player", r.unique_id, r.name));
+      );
+      renderSortableTable("searchTableHost", cols, data.rows, (r) => openEntity("player", r.unique_id, r.name));
     }
   }
 
@@ -1627,18 +2147,26 @@
   }
 
   // ---- Generic Sortable Table Renderer ----
-  function renderSortableTable(hostId, cols, rows, onClickRow) {
+  function renderSortableTable(hostId, cols, rows, onClickRow, opts = {}) {
     const host = document.getElementById(hostId);
     if (!host) return;
     const st = state.sortState[hostId] || { col: null, asc: false };
     const sorted = [...rows];
     if (st.col) {
+      const colDef = cols.find((c) => c.key === st.col);
+      const sortField = (colDef && colDef.sortKey) || st.col;
       sorted.sort((a, b) => {
-        const va = a[st.col], vb = b[st.col];
-        if (typeof va === "number" && typeof vb === "number") return st.asc ? va - vb : vb - va;
+        const va = a[sortField], vb = b[sortField];
+        if (typeof va === "number" && typeof vb === "number") {
+          const diff = st.asc ? va - vb : vb - va;
+          if (diff !== 0) return diff;
+          // Secondary tie-breaker: higher rating / CA first
+          return (Number(b.rating ?? b.ca ?? 0) - Number(a.rating ?? a.ca ?? 0));
+        }
         return st.asc ? String(va ?? "").localeCompare(String(vb ?? "")) : String(vb ?? "").localeCompare(String(va ?? ""));
       });
     }
+    const rowClassFn = typeof opts.rowClass === "function" ? opts.rowClass : null;
     host.innerHTML = `
       <table class="data-table">
         <thead>
@@ -1650,7 +2178,7 @@
         </thead>
         <tbody>
           ${sorted.map((r, idx) => `
-            <tr data-ridx="${idx}">
+            <tr data-ridx="${idx}" class="${rowClassFn ? esc(rowClassFn(r)) : ""}">
               ${cols.map((c) => `<td>${c.render ? c.render(r) : esc(r[c.key] ?? "—")}</td>`).join("")}
             </tr>
           `).join("") || `<tr><td colspan="${cols.length}" class="empty-note">No matching records.</td></tr>`}
@@ -1660,8 +2188,10 @@
     host.querySelectorAll("th[data-scol]").forEach((th) => {
       th.onclick = () => {
         const col = th.dataset.scol;
-        state.sortState[hostId] = { col, asc: st.col === col ? !st.asc : false };
-        renderSortableTable(hostId, cols, rows, onClickRow);
+        const colDef = cols.find((c) => c.key === col);
+        const initAsc = !!(colDef && colDef.defaultAsc);
+        state.sortState[hostId] = { col, asc: st.col === col ? !st.asc : initAsc };
+        renderSortableTable(hostId, cols, rows, onClickRow, opts);
       };
     });
     host.querySelectorAll("tbody tr[data-ridx]").forEach((tr) => {
@@ -1850,10 +2380,10 @@
           <h4>FM27 AI Tactical &amp; Squad Assistant</h4>
           <p>Ask about the player or club open on the left, or type <code>/</code> for instant commands (<code>/analyze</code>, <code>/bestxi</code>, <code>/heal</code>, <code>/inspire</code>).</p>
           <div class="starter-grid">
+            <button class="starter-btn" data-starter="/lab">Run native Match Lab A/B tactic test</button>
             <button class="starter-btn" data-starter="/analyze">Analyze my squad depth &amp; injury risks</button>
             <button class="starter-btn" data-starter="/bestxi">Build my optimal Best XI &amp; tactic roles</button>
             <button class="starter-btn" data-starter="/shortlist U23 right-back under £30M">Scout U23 right-back targets under £30M</button>
-            <button class="starter-btn" data-starter="/inspire">Inspire active player (Morale 100)</button>
           </div>
         </div>
       `;
@@ -1873,11 +2403,13 @@
       }
       const totalToolMs = (t.tools || []).reduce((acc, x) => acc + (x.ms || 0), 0);
       const totalSec = t.elapsedMs ? `${(t.elapsedMs / 1000).toFixed(1)}s` : (t.pending ? "Thinking…" : "Done");
+      const effortTag = (t.reasoningEffort && t.reasoningEffort !== "Default") ? ` · ${t.reasoningEffort}` : "";
+      const tokTag = t.reasoningTokens ? ` · ${t.reasoningTokens} tok` : "";
       const progressPct = t.pending ? 68 : 100;
       const thinkBlock = (t.pending || (t.steps && t.steps.length) || t.thinking) ? `
         <div class="think-card">
           <div class="think-head" data-toggle-think="${idx}">
-            <span>Thinking Process · ${totalSec}</span>
+            <span>Thinking Process${esc(effortTag)}${esc(tokTag)} · ${totalSec}</span>
             <span style="color:var(--muted)">${t.thinkOpen ? "▾" : "▸"}</span>
           </div>
           <div class="think-progress"><div class="think-progress-fill" style="width:${progressPct}%"></div></div>
@@ -1899,7 +2431,7 @@
           <div class="tools-list ${t.toolsOpen ? "" : "collapsed"}">
             ${t.tools.map((tl) => `
               <div class="tool-row">
-                <span><span class="tool-ok ${tl.ok === false ? "tool-err" : ""}"></span>${esc(tl.name)}(${esc(JSON.stringify(tl.args || {}))})</span>
+                <span><span class="tool-ok ${tl.ok === false ? "tool-err" : ""}"></span>${esc(tl.name)}(${esc(JSON.stringify(tl.args || {}))})${tl.running && tl.progress ? ` <em style="color:var(--ink);font-style:normal;">· ${esc(tl.progress)}</em>` : (!tl.running && tl.summary ? ` <em style="color:var(--muted);font-style:normal;">· ${esc(tl.summary)}</em>` : "")}</span>
                 <span style="color:var(--muted)">${tl.running ? "…" : (tl.ms + "ms")}</span>
               </div>
             `).join("")}
@@ -2047,7 +2579,11 @@
     state.aiBusy = true;
     document.getElementById("btnSend").disabled = true;
     state.chatTurns.push({ role: "user", text: prompt, attachments });
-    const turn = { role: "assistant", text: "", steps: [], thinking: "", tools: [], pending: true, thinkOpen: true, toolsOpen: false };
+    const turn = {
+      role: "assistant", text: "", steps: [], thinking: "", tools: [],
+      reasoningEffort: state.aiSettings?.reasoning || "Default", reasoningTokens: 0,
+      pending: true, thinkOpen: true, toolsOpen: false,
+    };
     state.chatTurns.push(turn);
     renderChatThread();
 
@@ -2057,6 +2593,13 @@
         headers: { "Content-Type": "application/json", "X-Studio-Token": TOKEN },
         body: JSON.stringify({ prompt, context: activeContextPayload(), attachments }),
       });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || `HTTP ${res.status}`);
+      }
+      if (!res.body || !res.body.getReader) {
+        throw new Error("Streaming response unavailable");
+      }
       const reader = res.body.getReader();
       const dec = new TextDecoder();
       let buf = "";
@@ -2073,21 +2616,39 @@
           if (ev.type === "step") {
             turn.steps.push(ev);
           } else if (ev.type === "thinking") {
-            turn.thinking = (turn.thinking ? turn.thinking + "\n\n" : "") + ev.text;
+            if (ev.text) turn.thinking = (turn.thinking ? turn.thinking + "\n\n" : "") + ev.text;
+            if (ev.effort) turn.reasoningEffort = ev.effort;
+            if (typeof ev.reasoning_tokens === "number" && ev.reasoning_tokens > 0) {
+              turn.reasoningTokens = (turn.reasoningTokens || 0) + ev.reasoning_tokens;
+            }
           } else if (ev.type === "tool_start") {
-            turn.tools.push({ id: ev.id, name: ev.name, args: ev.args, running: true, ms: 0, ok: true });
+            turn.tools.push({ id: ev.id, name: ev.name, args: ev.args, running: true, ms: 0, ok: true, progress: "" });
+            if (String(ev.name || "").startsWith("fm27_lab_")) turn.toolsOpen = true;
+          } else if (ev.type === "tool_progress") {
+            const existing = turn.tools.find((x) => x.id === ev.id);
+            if (existing) existing.progress = ev.message || "";
           } else if (ev.type === "tool_done") {
             const existing = turn.tools.find((x) => x.id === ev.id);
-            if (existing) Object.assign(existing, { running: false, ms: ev.ms, ok: ev.ok, summary: ev.summary });
-            else turn.tools.push({ id: ev.id, name: ev.name, args: ev.args, running: false, ms: ev.ms, ok: ev.ok });
+            if (existing) Object.assign(existing, { running: false, ms: ev.ms, ok: ev.ok, summary: ev.summary, progress: "" });
+            else turn.tools.push({ id: ev.id, name: ev.name, args: ev.args, running: false, ms: ev.ms, ok: ev.ok, summary: ev.summary });
           } else if (ev.type === "done") {
             turn.pending = false;
             turn.thinkOpen = false;
             turn.text = ev.text || "";
             turn.elapsedMs = ev.elapsed_ms || 0;
+            if (ev.reasoning_effort) turn.reasoningEffort = ev.reasoning_effort;
+            if (typeof ev.reasoning_tokens === "number") turn.reasoningTokens = ev.reasoning_tokens;
             if (ev.status) renderStatus(ev.status);
+            if (Array.isArray(ev.sessions)) {
+              state.chatSessions = ev.sessions;
+              if (ev.active_session_id) state.activeSessionId = ev.active_session_id;
+              renderChatSessionBar();
+            }
             if (ev.refresh_entity && getActiveTab()?.key === `${ev.refresh_entity.kind}:${ev.refresh_entity.id}`) {
               renderActiveView();
+            }
+            if ((turn.tools || []).some((x) => String(x.name || "").startsWith("fm27_lab_"))) {
+              pollLabJobs();
             }
           } else if (ev.type === "error") {
             turn.pending = false;
@@ -2100,12 +2661,52 @@
     } catch (err) {
       turn.pending = false;
       turn.error = true;
-      turn.text = `Connection failed: ${err.message}`;
+      const msg = err && err.message ? err.message : String(err);
+      turn.text = /failed to fetch|networkerror|load failed/i.test(msg)
+        ? `Connection failed: ${msg} — 本地 FM27 Studio 后端连接已断开，请关闭当前窗口后重新运行 start_studio.bat（运行期间不要关闭启动终端窗口）。`
+        : `Connection failed: ${msg}`;
       renderChatThread();
     } finally {
       state.aiBusy = false;
       document.getElementById("btnSend").disabled = false;
     }
+  }
+
+  // ---- Persistent Chat Sessions ----
+  function renderChatSessionBar() {
+    const sel = document.getElementById("chatSessionSelect");
+    if (!sel) return;
+    const list = state.chatSessions || [];
+    if (!list.length) {
+      sel.innerHTML = '<option value="">New Chat</option>';
+      return;
+    }
+    sel.innerHTML = list.map((s) => {
+      const cnt = s.turn_count ? ` (${Math.ceil(s.turn_count / 2)})` : "";
+      return `<option value="${esc(s.id)}" ${s.id === state.activeSessionId ? "selected" : ""}>${esc(s.title || "New Chat")}${cnt}</option>`;
+    }).join("");
+  }
+
+  function applySessionPayload(res) {
+    if (!res || !res.ok) return;
+    state.chatSessions = res.sessions || [];
+    state.activeSessionId = res.active_id || "";
+    const turns = (res.active && Array.isArray(res.active.turns)) ? res.active.turns : [];
+    state.chatTurns = turns.map((t) => ({
+      ...t,
+      pending: false,
+      thinkOpen: false,
+      toolsOpen: false,
+    }));
+    renderChatSessionBar();
+    renderChatThread();
+  }
+
+  async function loadChatSessions() {
+    try {
+      const res = await apiGet("/api/ai/sessions");
+      applySessionPayload(res);
+    } catch (_) {}
   }
 
   // ---- Slash Command Palette ----
@@ -2444,19 +3045,31 @@
       const week = await apiGet(`/api/plans/training?focus=${encodeURIComponent(focus)}&club=${encodeURIComponent(club)}`);
       const local = week.local_schedules || {};
       const localList = (local.files || []).slice(0, 8);
+      const notes = week.notes || [];
       host.innerHTML = `
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;">
-          <span class="modal-note">S24 evidence-based schedule</span>
-          <button class="mini-btn" id="btnCopyTrainingSheet">Copy Sheet</button>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;">
+          <span class="modal-note">S24 evidence-based · direct .fmf export</span>
+          <div style="display:flex;gap:5px;">
+            <button class="mini-btn" id="btnCopyTrainingSheet">Copy Sheet</button>
+            <button class="dl-pill-btn" id="btnExportTrainingFmf" title="Export loadable .fmf directly into FM27/schedules">↓ Export .fmf</button>
+          </div>
         </div>
         ${(week.days || []).map((d) => `
           <div class="day-card">
             <div class="day-head"><span>${esc(d.day)}</span></div>
             <div class="day-sessions">
-              ${(d.sessions || []).map((s, i) => `<div>${i + 1}. ${esc(s.label || s.name || "")}</div>`).join("")}
+              ${(d.sessions || []).map((s, i) => `<div>${i + 1}. ${esc(s.label || s.name || "")} <span style="color:var(--muted);font-size:10px;">#${s.id}</span></div>`).join("")}
             </div>
           </div>
         `).join("")}
+        ${notes.length ? `
+          <div class="card">
+            <div class="card-head"><span>Evidence Notes</span></div>
+            <div class="card-body">
+              ${notes.map((n) => `<div class="modal-note" style="margin-bottom:4px;">• ${esc(n)}</div>`).join("")}
+            </div>
+          </div>
+        ` : ""}
         ${localList.length ? `
           <div class="card">
             <div class="card-head"><span>Local FM27 Schedules (${local.count})</span></div>
@@ -2473,6 +3086,33 @@
             () => toast("Training sheet copied to clipboard", "ok"),
             () => toast("Could not access clipboard", "info")
           );
+        };
+      }
+      const expBtn = document.getElementById("btnExportTrainingFmf");
+      if (expBtn) {
+        expBtn.onclick = async () => {
+          expBtn.disabled = true;
+          expBtn.textContent = "Exporting…";
+          try {
+            const res = await apiPost("/api/plans/training/export", {
+              focus,
+              club,
+              name: week.name || `${club} - ${focus}`,
+            });
+            if (res.ok) {
+              expBtn.textContent = "✓ Exported";
+              toast(`${res.filename} saved! Load in FM27: Training > Schedules > Load`, "ok");
+              setTimeout(() => loadTrainingTab(), 600);
+            } else {
+              expBtn.disabled = false;
+              expBtn.textContent = "↓ Export .fmf";
+              toast(res.error || "Export failed", "error");
+            }
+          } catch (err) {
+            expBtn.disabled = false;
+            expBtn.textContent = "↓ Export .fmf";
+            toast(err.message, "error");
+          }
         };
       }
     } catch (err) {
@@ -2504,18 +3144,46 @@
   }
   async function doAttach(silent = false) {
     const btn = document.getElementById("btnAttach");
+    const lbl = document.getElementById("btnAttachLabel");
+    const prevLbl = lbl ? lbl.textContent : "";
     btn.disabled = true;
+    if (!silent && lbl) lbl.textContent = "Syncing…";
     try {
-      const res = await apiPost("/api/attach", { refresh_all: false });
+      // Manual "Load Game" / "Refresh Live" reloads ALL live player records, injuries,
+      // contracts, loans & club budgets from FM27 RAM; silent startup auto-attach stays
+      // instant (~35ms) and syncs full live state in the background right after.
+      const res = await apiPost("/api/attach", { refresh_all: !silent });
       renderStatus(res.status);
       if (res.ok) {
         if (!silent) toast(res.message, "ok");
+        renderRecent();
         renderActiveView();
+        if (silent && res.status?.attached && !(res.status?.live_count > 0)) {
+          let tries = 0;
+          const waitLive = async () => {
+            tries += 1;
+            try {
+              const st = await apiGet("/api/status");
+              if (st.attached && st.live_count > 0) {
+                renderStatus(st);
+                renderRecent();
+                renderActiveView();
+                return;
+              }
+            } catch (_) {}
+            if (tries < 5) setTimeout(waitLive, 1500);
+          };
+          setTimeout(waitLive, 1800);
+        }
       } else if (!silent) {
+        if (lbl) lbl.textContent = prevLbl || "Load Game";
         toast(res.error || "Could not attach to FM27", "error");
       }
     } catch (err) {
-      if (!silent) toast(err.message, "error");
+      if (!silent) {
+        if (lbl) lbl.textContent = prevLbl || "Load Game";
+        toast(err.message, "error");
+      }
     } finally {
       btn.disabled = false;
     }
@@ -2591,7 +3259,42 @@
     const clearRecentBtn = document.getElementById("btnClearRecent");
     if (clearRecentBtn) clearRecentBtn.onclick = clearUnpinnedRecent;
 
-    // AI Modes
+    // AI Modes & Chat Session Controls
+    document.getElementById("chatSessionSelect")?.addEventListener("change", async (e) => {
+      if (state.aiBusy) return;
+      const sid = e.target.value;
+      if (!sid) return;
+      try {
+        const res = await apiPost("/api/ai/sessions", { action: "select", id: sid });
+        applySessionPayload(res);
+      } catch (err) {
+        toast(err.message, "error");
+      }
+    });
+    const createNewChatSession = async () => {
+      if (state.aiBusy) return;
+      try {
+        const res = await apiPost("/api/ai/sessions", { action: "new" });
+        applySessionPayload(res);
+        document.getElementById("chatInput")?.focus();
+        toast("Started a new chat", "info");
+      } catch (err) {
+        toast(err.message, "error");
+      }
+    };
+    document.getElementById("btnNewChat")?.addEventListener("click", createNewChatSession);
+    document.getElementById("btnNewChatTop")?.addEventListener("click", createNewChatSession);
+    document.getElementById("btnDeleteChat")?.addEventListener("click", async () => {
+      if (state.aiBusy || !state.activeSessionId) return;
+      try {
+        const res = await apiPost("/api/ai/sessions", { action: "delete", id: state.activeSessionId });
+        applySessionPayload(res);
+        toast("Chat deleted", "info");
+      } catch (err) {
+        toast(err.message, "error");
+      }
+    });
+
     document.querySelectorAll(".ai-mode[data-aimode]").forEach((el) => {
       el.onclick = () => {
         state.aiMode = el.dataset.aimode;
@@ -2761,12 +3464,6 @@
       if (pal.classList.contains("open")) closeCmdPalette();
       else { openCmdPalette("/"); chatInput.focus(); }
     };
-    document.getElementById("btnNewChat").onclick = async () => {
-      await apiPost("/api/ai/clear");
-      state.chatTurns = [];
-      renderChatThread();
-      toast("Started a new chat", "info");
-    };
     chatInput.addEventListener("input", () => {
       const v = chatInput.value;
       if (v.startsWith("/") && !v.includes(" ")) openCmdPalette(v);
@@ -2888,6 +3585,11 @@
     wireEvents();
     bindMagnetic(document);
     renderChatThread();
+    // Lightweight heartbeat keeps launch_studio.py aware the Studio window is open
+    // even when Edge hands off to an existing BrowserProfile instance.
+    setInterval(() => {
+      fetch("/api/ping", { headers: { "X-Studio-Token": TOKEN } }).catch(() => {});
+    }, 15000);
 
     try {
       const boot = await apiGet("/api/bootstrap");
@@ -2895,6 +3597,7 @@
       state.aiSettings = boot.ai;
       renderStatus(boot.status);
       syncComposerControls(boot.ai);
+      loadChatSessions();
 
       if (!state.recent.length && boot.default_players) {
         for (const p of boot.default_players.slice(0, 3)) {
@@ -2922,9 +3625,26 @@
         openMyClub();
       }
 
-      // Auto-attach silently if FM27 is running (takes ~35ms on build 2505117)
+      // Auto-attach silently if FM27 is running; if launch_studio already attached and
+      // background full live sync is finishing, refresh active view once live_count > 0.
       if (!boot.status.attached) {
         doAttach(true);
+      } else if (!(boot.status.live_count > 0)) {
+        let tries = 0;
+        const waitBootLive = async () => {
+          tries += 1;
+          try {
+            const st = await apiGet("/api/status");
+            if (st.attached && st.live_count > 0) {
+              renderStatus(st);
+              renderRecent();
+              renderActiveView();
+              return;
+            }
+          } catch (_) {}
+          if (tries < 6) setTimeout(waitBootLive, 1500);
+        };
+        setTimeout(waitBootLive, 1800);
       }
     } catch (err) {
       document.getElementById("centerBody").innerHTML = `<div class="empty-state">Failed to connect to FM27 Studio backend: ${esc(err.message)}</div>`;

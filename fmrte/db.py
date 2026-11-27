@@ -100,7 +100,8 @@ POSITIONS = [(position.label, position.column) for position in spec.POSITIONS]
 # every squad line, and while the column was missing every line read
 # "sharp None" even though S5-SHARPNESS-FIRST is one of the always-on rules.
 SQUAD_COLUMNS: tuple[str, ...] = (
-    "id", "unique_id", "name", "club", "age", "nationality", "ca", "pa",
+    "id", "unique_id", "name", "club", "playing_club", "loan_club", "is_loaned_out",
+    "age", "nationality", "ca", "pa",
     "asking_price", "salary_weekly_raw", "contract_end_date",
 ) + tuple(position.column for position in spec.POSITIONS) + (
     "condition", "match_sharpness", "jadedness", "morale", "injured",
@@ -117,8 +118,8 @@ SORTABLE_COLUMNS: frozenset[str] = frozenset(spec.KNOWN_COLUMN_SET) | frozenset(
     "transfer_listed", "listed_for_loan", "transfer_agreed", "injured",
     "injury", "injury_start_date", "injury_expected_return",
     "contract_end_date", "asking_price", "salary_pa", "salary_weekly_raw",
-    "date_of_birth", "playing_club", "on_duty", "condition",
-    "match_sharpness", "jadedness", "morale",
+    "date_of_birth", "playing_club", "loan_club", "is_loaned_out",
+    "on_duty", "condition", "match_sharpness", "jadedness", "morale",
 })
 
 # The live-overlay columns ``heal`` clears, and the journal column it is
@@ -146,8 +147,13 @@ DATE_COLUMNS: tuple[str, ...] = ("contract_end_date", "joined_club_date")
 LIVE_OVERLAY_COLUMNS: frozenset[str] = frozenset({
     "ca", "pa", "condition", "match_sharpness", "jadedness", "morale",
     "home_reputation", "current_reputation", "world_reputation",
-    "display_name",
+    "display_name", "asking_price", "salary_weekly_raw", "salary_pa",
+    "contract_end_date", "joined_club_date", "transfer_listed",
+    "listed_for_loan",
 }) | frozenset(INJURY_LIVE_COLUMNS)
+LIVE_CLUB_OVERLAY_COLUMNS: frozenset[str] = frozenset({
+    "club", "playing_club", "loan_club", "is_loaned_out",
+})
 
 CLUB_DISPLAY = {
     "Milan": "AC Milan",
@@ -492,6 +498,8 @@ class Snapshot:
         self.redo_stack: list[EditAction] = []
         self.saved_edits: dict[str, Any] = {}
         self.live: dict[int, dict[str, Any]] = {}
+        self.club_live: dict[str, dict[str, Any]] = {}
+        self._live_has_clubs: bool = False
         self.live_meta: dict[str, str] = {}
         # The attached game, when the person has pressed Load Game. Edits go
         # into the game through this; the snapshot is only the reading copy.
@@ -594,9 +602,53 @@ class Snapshot:
         row = self._fetchone("SELECT * FROM players WHERE id=?", (row_id,))
         return self.apply_overlay("players", dict(row)) if row else None
 
+    def _loaned_in_players(self, club: str, columns: Sequence[str] | str = "*") -> list[dict[str, Any]]:
+        """Players currently on loan IN to ``club`` (owned by another club)."""
+        name = (club or "").strip()
+        if not name:
+            return []
+        wanted = self._projection(columns)
+        need_cols = ("id", "unique_id", "club", "playing_club", "loan_club")
+        selected = "*" if wanted is None else ", ".join(
+            f'"{col}"' for col in dict.fromkeys((*need_cols, *wanted)))
+        with self._lock:
+            live_loan_uids = [
+                uid for uid, entry in self.live.items()
+                if (entry.get("playing_club") == name or entry.get("loan_club") == name)
+                and entry.get("club") != name
+            ]
+            params: list[Any] = [name, name, name]
+            extra_clause = ""
+            if live_loan_uids and len(live_loan_uids) <= 5000:
+                ph = ",".join("?" for _ in live_loan_uids)
+                extra_clause = f" OR unique_id IN ({ph})"
+                params.extend(live_loan_uids)
+            sql = (
+                f"SELECT {selected} FROM players "
+                f"WHERE ((playing_club=? OR loan_club=?) AND (club IS NULL OR club!=?)){extra_clause}"
+            )
+            rows = []
+            for r in self._fetchall(sql, tuple(params)):
+                row = self.apply_overlay("players", dict(r))
+                if (row.get("playing_club") == name or row.get("loan_club") == name) and row.get("club") != name:
+                    rows.append(row)
+        if wanted is not None:
+            rows = [{k: row.get(k) for k in wanted} for row in rows]
+        return rows
+
     def squad(self, club: str, limit: int = 300) -> list[dict[str, Any]]:
-        """One club's players in the columns a list screen draws, best first."""
-        return self.query_players(club=club, limit=limit, columns=SQUAD_COLUMNS)
+        """One club's players (owned + loaned in) in list columns, best first."""
+        name = (club or "").strip()
+        if not name:
+            return []
+        owned = self.query_players(club=name, limit=limit, columns=SQUAD_COLUMNS)
+        seen = {row.get("id") for row in owned}
+        loaned_in = [r for r in self._loaned_in_players(name, columns=SQUAD_COLUMNS)
+                     if r.get("id") not in seen]
+        if not loaned_in:
+            return owned
+        combined = _ordered(owned + loaned_in, "ca", True)
+        return combined[:limit] if limit is not None else combined
 
     def search_players(self, query: str, limit: int = 200) -> list[dict[str, Any]]:
         """The search box's own rule: the text in the player's name or club."""
@@ -606,7 +658,7 @@ class Snapshot:
     def players_for_club(self, club: str, limit: int = 300,
                          order: str = "ca",
                          descending: bool = True) -> list[dict[str, Any]]:
-        """Every column for one club's players, with the overlays applied.
+        """Every column for one club's players (owned + loaned in), with overlays applied.
 
         ``squad()`` selects the twenty columns a list needs; a role fit needs
         all fifty-four attributes, so this returns the whole row - which is
@@ -615,21 +667,34 @@ class Snapshot:
         name = (club or "").strip()
         if not name:
             return []
-        return self.query_players(club=name, limit=limit, order=order,
-                                  descending=descending, columns="*")
+        owned = self.query_players(club=name, limit=limit, order=order,
+                                   descending=descending, columns="*")
+        seen = {row.get("id") for row in owned}
+        loaned_in = [r for r in self._loaned_in_players(name, columns="*")
+                     if r.get("id") not in seen]
+        if not loaned_in:
+            return owned
+        combined = _ordered(owned + loaned_in, order, descending)
+        return combined[:limit] if limit is not None else combined
 
     def _ensure_player_search_index(self) -> list[tuple[int, str, str, str]]:
         if self._player_search_index is None:
             rows = self._fetchall("SELECT id, unique_id, name, club FROM players")
             idx: list[tuple[int, str, str, str]] = []
             for r in rows:
-                raw_club = r["club"] or ""
+                uid = int(r["unique_id"] or 0)
+                live = self.live.get(uid) if uid else None
+                raw_club = (live.get("club") if live and live.get("club") else None) or r["club"] or ""
+                play_club = (live.get("playing_club") if live and live.get("playing_club") else None) or ""
                 disp_club = CLUB_DISPLAY.get(raw_club, raw_club)
+                extra = disp_club if disp_club != raw_club else ""
+                if play_club and play_club != raw_club:
+                    extra = f"{extra} {play_club}".strip()
                 idx.append((
                     int(r["id"]),
                     fold_text(r["name"]),
                     fold_text(raw_club),
-                    fold_text(disp_club) if disp_club != raw_club else "",
+                    fold_text(extra) if extra else "",
                 ))
             self._player_search_index = idx
         return self._player_search_index
@@ -699,6 +764,7 @@ class Snapshot:
                       transfer_listed: bool | None = None,
                       injured: bool | None = None,
                       exclude_free_agents: bool = False,
+                      attr_filters: Sequence[tuple[str, int | None, int | None]] | None = None,
                       order: str = "ca",
                       descending: bool = True,
                       limit: int | None = 200,
@@ -728,6 +794,17 @@ class Snapshot:
                                   ("pa", min_pa, "min"), ("pa", max_pa, "max")):
             if value is not None:
                 filters.append((column, op, int(value)))
+        if attr_filters:
+            for item in attr_filters:
+                if not isinstance(item, (list, tuple)) or len(item) != 3:
+                    continue
+                col, lo, hi = str(item[0] or "").strip().lower(), item[1], item[2]
+                if col not in spec.KNOWN_COLUMN_SET:
+                    continue
+                if lo is not None:
+                    filters.append((col, "min", int(lo)))
+                if hi is not None:
+                    filters.append((col, "max", int(hi)))
         if nationality is not None:
             filters.append(("nationality", "eq", nationality))
         if transfer_listed is not None:
@@ -759,6 +836,27 @@ class Snapshot:
 
             clauses, params = [], []
             for column, op, value in filters:
+                if self.live and op == "eq" and column in ("club", "injured", "transfer_listed", "listed_for_loan"):
+                    if column in ("injured", "transfer_listed", "listed_for_loan") and value == 0:
+                        # Live overlay can clear snapshot flags (e.g. recovered injuries);
+                        # skip SQL pushdown so _overlay_page + _row_matches sees them.
+                        continue
+                    live_uids = [
+                        uid for uid, entry in self.live.items()
+                        if entry.get(column) == value
+                    ]
+                    if len(live_uids) > 5000:
+                        continue
+                    clause, values = self._sql_condition(column, op, value)
+                    if live_uids:
+                        ph = ",".join("?" for _ in live_uids)
+                        clauses.append(f"({clause} OR unique_id IN ({ph}))")
+                        params.extend(values)
+                        params.extend(live_uids)
+                    else:
+                        clauses.append(clause)
+                        params.extend(values)
+                    continue
                 clause, values = self._sql_condition(column, op, value)
                 clauses.append(clause)
                 params.extend(values)
@@ -900,6 +998,8 @@ class Snapshot:
         mutable: set[str] = set()
         if self.live:
             mutable |= LIVE_OVERLAY_COLUMNS
+            if self._live_has_clubs:
+                mutable |= LIVE_CLUB_OVERLAY_COLUMNS
         if self.edits:
             mutable |= {key.rsplit(":", 1)[-1] for key in self.edits}
         if not mutable:
@@ -1108,6 +1208,8 @@ class Snapshot:
                     max_age: int | None = None,
                     min_ca: int | None = None,
                     max_ca: int | None = None,
+                    min_pa: int | None = None,
+                    max_pa: int | None = None,
                     order: str = "ca",
                     descending: bool = True,
                     limit: int = 200) -> list[dict[str, Any]]:
@@ -1157,6 +1259,12 @@ class Snapshot:
         if max_ca is not None:
             clauses.append("ca <= ?")
             params.append(int(max_ca))
+        if min_pa is not None:
+            clauses.append("pa >= ?")
+            params.append(int(min_pa))
+        if max_pa is not None:
+            clauses.append("pa <= ?")
+            params.append(int(max_pa))
         id_set: set[int] | None = None
         if staff_scores is not None:
             if len(staff_scores) <= 850:
@@ -1426,7 +1534,8 @@ class Snapshot:
             return False
         return bool(getattr(self.editor, "read_only", False))
 
-    def attach_live(self, editor, records=None, report=None) -> int:
+    def attach_live(self, editor, records=None, report=None,
+                    club_finances: Mapping[str, Mapping[str, Any]] | None = None) -> int:
         """Own the live session: store the editor and apply what was read.
 
         ``records`` is what the caller read out of the game - an iterable of
@@ -1466,7 +1575,13 @@ class Snapshot:
                 # values for a player the game no longer reports must not
                 # survive it.
                 self.live.clear()
-                count = self.apply_live(records)
+                self._live_has_clubs = False
+                if club_finances is not None:
+                    self.club_live.clear()
+                count = self.apply_live(records, club_finances=club_finances)
+            elif club_finances is not None:
+                self.club_live.clear()
+                self.apply_live((), club_finances=club_finances)
             if not self.read_only:
                 self.flush_pending()
         return count
@@ -1483,7 +1598,10 @@ class Snapshot:
             editor = self.editor
             self.editor = None
             self.live.clear()
+            self.club_live.clear()
+            self._live_has_clubs = False
             self.live_meta.clear()
+            self._player_search_index = None
             # Inside the lock: a write that is still running on another thread
             # must not have the handle pulled out from under it.
             self._close_editor(editor)
@@ -1547,6 +1665,7 @@ class Snapshot:
                 raise
             editor = self.editor
             live = dict(self.live)
+            club_live = dict(self.club_live)
             live_meta = dict(self.live_meta)
             self.path = target
             self.conn = new_conn
@@ -1566,11 +1685,14 @@ class Snapshot:
                 self.editor = editor
                 self.live.clear()
                 self.live.update(live)
+                self.club_live.clear()
+                self.club_live.update(club_live)
                 self.live_meta.clear()
                 self.live_meta.update(live_meta)
             else:
                 self.editor = None
                 self.live.clear()
+                self.club_live.clear()
                 self.live_meta.clear()
                 self._close_editor(editor)
             self._load_edits()
@@ -1619,6 +1741,11 @@ class Snapshot:
                 live = self.live.get(int(row.get("unique_id") or 0))
                 if live:
                     row.update(live)
+            elif table == "clubs" and self.club_live:
+                c_key = str(row.get("name") or "").strip().lower()
+                clive = self.club_live.get(c_key) if c_key else None
+                if clive:
+                    row.update(clive)
             if not self.edits:
                 return row
             prefix = f"{table}:{row.get('id')}:"
@@ -1629,14 +1756,26 @@ class Snapshot:
                         row[column] = value
             return row
 
-    def apply_live(self, records) -> int:
+    def apply_live(self, records, *,
+                   club_finances: Mapping[str, Mapping[str, Any]] | None = None) -> int:
         """Merge values read from the running game; never marks an edit."""
         if isinstance(records, Mapping):
             records = records.values()
         count = 0
+        club_changed = False
+        _optional_fields = (
+            "asking_price", "salary_weekly_raw", "salary_pa",
+            "contract_end_date", "joined_club_date",
+            "transfer_listed", "listed_for_loan",
+            "club", "playing_club", "loan_club", "is_loaned_out",
+            "injured", "injury", "injury_start_date",
+            "injury_light_training_days_remaining",
+            "injury_full_training_days_remaining",
+            "injury_expected_return",
+        )
         with self._lock:
             for record in records:
-                entry = {
+                entry: dict[str, Any] = {
                     "ca": record.ca,
                     "pa": record.pa,
                     "condition": record.condition,
@@ -1650,8 +1789,26 @@ class Snapshot:
                 live_name = (getattr(record, "display_name", "") or "").strip()
                 if live_name:
                     entry["display_name"] = live_name
+                for fname in _optional_fields:
+                    val = getattr(record, fname, None)
+                    if val is not None:
+                        entry[fname] = val
+                        if fname == "club":
+                            club_changed = True
+                if "injury_light_training_days_remaining" in entry:
+                    entry["injury_min_days_remaining"] = entry["injury_light_training_days_remaining"]
+                if "injury_full_training_days_remaining" in entry:
+                    entry["injury_max_days_remaining"] = entry["injury_full_training_days_remaining"]
                 self.live[int(record.unique_id)] = entry
                 count += 1
+            if club_finances:
+                for cname, fvals in club_finances.items():
+                    key = str(cname or "").strip().lower()
+                    if key and isinstance(fvals, Mapping):
+                        self.club_live[key] = dict(fvals)
+            if club_changed:
+                self._live_has_clubs = True
+                self._player_search_index = None
         return count
 
     def flush_pending(self) -> tuple[int, int]:

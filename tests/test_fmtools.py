@@ -530,6 +530,49 @@ class SquadTests(unittest.TestCase):
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["game_date"], "2026-07-20")
 
+    def test_staff_ratings_and_find_staff_tool(self):
+        from fmrte import staffratings as SR
+
+        elite_coach = {
+            "defending": 20, "tactical": 18, "attacking": 12, "technical": 14,
+            "fitness": 18, "mental": 15, "set_pieces": 16, "tactical_knowledge": 18,
+            "determination": 18, "level_of_discipline": 18, "motivating": 18,
+            "judging_player_ability": 19, "judging_player_potential": 19,
+            "adaptability": 16, "physiotherapy": 19, "sports_science": 17,
+            "working_with_youngsters": 18, "negotiating": 17,
+            "man_management": 16, "analysing_data": 18,
+            "gk_shot_stopping": 10, "gk_handling": 10, "gk_distribution": 10,
+            "ca": 170,
+        }
+        # DDM = 54; defending_tactical = 20*6 + 18*3 + 54*2 = 282 -> 5.0★
+        ev = SR.evaluate_staff(elite_coach, job="Coach", focus_category="defending_tactical")
+        self.assertTrue(ev["live_stars"])
+        self.assertEqual(ev["ddm"], 54)
+        self.assertEqual(ev["score"], 282.0)
+        self.assertEqual(ev["stars"], 5.0)
+        # Scout = 19*5 + 19*5 + 16*3 + 18*2 = 274 -> 5.0★
+        ev_sc = SR.evaluate_staff(elite_coach, job="Scout", focus_category="scout")
+        self.assertEqual(ev_sc["stars"], 5.0)
+        # Snapshot-only fallback (no live attrs)
+        snap_only = SR.evaluate_staff({"ca": 150}, job="Coach")
+        self.assertFalse(snap_only["live_stars"])
+        self.assertGreaterEqual(snap_only["stars"], 3.5)
+
+        # Position-specific player rating (WBL vs natural ST)
+        striker = _player(99, "Pure Striker", "Milan", striker=20, wing_back_left=8,
+                          finishing=18, off_the_ball=18, composure=17, pace=16, ca=160)
+        best_r = R.role_rating(striker)
+        wbl_r, wbl_role, wbl_comp = R.position_role_rating(striker, "WBL")
+        self.assertEqual(wbl_comp, 8)
+        self.assertTrue(wbl_role)
+        self.assertLess(wbl_r, best_r)
+
+        # fm27_find_staff works cleanly through execute_tool
+        res = F.execute_tool(self.db, "fm27_find_staff", {"club": "Milan", "limit": 120})
+        self.assertNotIn("error", res)
+        self.assertIn("staff", res)
+        self.assertIn("available_categories", res)
+
 
 class TrainingTests(unittest.TestCase):
     def test_a_week_has_seven_days_of_three_sessions(self):
@@ -566,6 +609,77 @@ class TrainingTests(unittest.TestCase):
         result = F.training_activities()
         self.assertEqual(result["count"], len(F.TRAINING_ACTIVITIES))
         self.assertIn("Rest", [row["name"] for row in result["activities"]])
+
+    def test_presets_avoid_s24_no_effect_sessions(self):
+        for focus in ("Balanced", "Tactical", "Pressing", "Attacking",
+                      "Ball control", "Physical", "Recovery", "Team bonding"):
+            week = F.training_week(focus)
+            ids = {s["id"] for d in week["days"] for s in d["sessions"]}
+            self.assertNotIn(4, ids, f"{focus} should not include Engagement line (4)")
+            self.assertNotIn(6, ids, f"{focus} should not include Pressing traps (6)")
+            self.assertIs(week["exports_fmf"], False)
+
+    def test_custom_days_matrix_builds_exact_week_and_validates(self):
+        import tempfile
+        from fmrte import schedulefiles as S
+
+        # FIPS-197 Appendix C.1 AES-128 test vector
+        self.assertEqual(
+            S._aes_encrypt_block(
+                bytes.fromhex("00112233445566778899aabbccddeeff"),
+                S._aes_expand_key(bytes.fromhex("000102030405060708090a0b0c0d0e0f")),
+            ),
+            bytes.fromhex("69c4e0d86a7b0430d8cdb78070b4c55a"),
+        )
+
+        custom = [
+            [301, 300, 300], [301, 300, 300], [5, 7, 301],
+            [2, 5, 301], [102, 2, 301], [500, 300, 300], [300, 300, 300],
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            prev = os.environ.get("FMRTE_SCHEDULES_DIR")
+            os.environ["FMRTE_SCHEDULES_DIR"] = tmpdir
+            try:
+                week = F.execute_tool(FakeDb(_squad()), "fm27_create_training_schedule", {
+                    "focus": "Derby",
+                    "name": "Milan 德比周 W1",
+                    "description": "赛后恢复+压迫强度+创造机会",
+                    "days": custom,
+                    "export_fmf": True,
+                })
+                self.assertNotIn("error", week)
+                self.assertEqual([[s["id"] for s in d["sessions"]] for d in week["days"]], custom)
+                self.assertIs(week["exports_fmf"], True)
+                self.assertTrue(os.path.isfile(week["exported_path"]))
+                self.assertTrue(week["filename"].endswith(".fmf"))
+
+                # Read the exported .fmf back via fm27_read_training_schedule
+                loaded = F.execute_tool(FakeDb(_squad()), "fm27_read_training_schedule", {
+                    "filename": week["filename"],
+                })
+                self.assertNotIn("error", loaded)
+                self.assertEqual(loaded["name"], "Milan 德比周 W1")
+                self.assertEqual(loaded["description"], "赛后恢复+压迫强度+创造机会")
+                self.assertEqual(loaded["days_ids"], custom)
+            finally:
+                if prev is None:
+                    os.environ.pop("FMRTE_SCHEDULES_DIR", None)
+                else:
+                    os.environ["FMRTE_SCHEDULES_DIR"] = prev
+
+        bad = F.training_week("Custom", days=[[999, 300, 300]] * 7)
+        self.assertIn("error", bad)
+        warn = F.training_week("Custom", days=[[4, 6, 301]] * 7)
+        self.assertTrue(any("S24" in n for n in warn["notes"]))
+
+    def test_lab_list_local_includes_schedules_and_reasoning_tokens_extract(self):
+        listed = F.execute_tool(FakeDb(_squad()), "fm27_lab_list_local", {})
+        self.assertTrue(listed.get("ok"))
+        self.assertIn("schedules", listed)
+        self.assertEqual(
+            A._extract_reasoning_tokens({"usage": {"completion_tokens_details": {"reasoning_tokens": 133}}}),
+            133,
+        )
 
 
 class SearchPushdownTests(unittest.TestCase):

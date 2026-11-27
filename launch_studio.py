@@ -69,6 +69,7 @@ def launch_browser_window(url: str, *, width: int = 1540, height: int = 920) -> 
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-features=TranslateUI",
+        "--disable-background-mode",
     ]
     creationflags = 0
     if sys.platform == "win32":
@@ -111,15 +112,24 @@ def main(argv: list[str] | None = None) -> int:
         if not args.no_browser:
             proc = launch_browser_window(url, width=args.width, height=args.height)
             if proc is not None:
-                # Wait briefly; if Edge handed off to an existing profile window,
-                # proc exits fast, in which case keep serving until Ctrl+C.
+                # Wait while the browser process is alive. Note that Edge/Chrome
+                # may hand off to an existing BrowserProfile instance and exit
+                # the launcher process in 1-6s while the Studio window stays open;
+                # keep serving as long as the UI heartbeat (/api/ping) is active.
                 start = time.monotonic()
                 while proc.poll() is None:
-                    time.sleep(0.3)
-                if time.monotonic() - start < 2.5:
-                    print("Browser window opened (press Ctrl+C to stop the server).", flush=True)
+                    time.sleep(0.4)
+                elapsed = time.monotonic() - start
+                if elapsed < 12.0 or server.is_client_active(within_seconds=35.0):
+                    print("Browser window active (server stays running until window closes or Ctrl+C).", flush=True)
+                    idle_grace = time.monotonic() + 25.0
                     while True:
-                        time.sleep(0.5)
+                        time.sleep(1.0)
+                        if time.monotonic() < idle_grace:
+                            continue
+                        if server.had_client and not server.is_client_active(within_seconds=45.0):
+                            print("Studio window closed; shutting down server.", flush=True)
+                            break
             else:
                 print("Opened in default browser (press Ctrl+C to stop the server).", flush=True)
                 while True:

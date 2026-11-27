@@ -42,7 +42,16 @@ def squad_rows(db: Any, club: str, limit: int = 200) -> list[dict[str, Any]]:
         rows = db.players_for_club(name, max(1, int(limit)))
     except Exception:  # noqa: BLE001 - a partial data layer must still answer
         return []
-    return [dict(row) for row in rows]
+    out: list[dict[str, Any]] = []
+    name_low = name.lower()
+    for row in rows:
+        item = dict(row)
+        playing = str(item.get("playing_club") or item.get("loan_club") or "").strip().lower()
+        own_club = str(item.get("club") or "").strip().lower()
+        if playing == name_low and own_club != name_low:
+            item["_for_club"] = name
+        out.append(item)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -188,13 +197,23 @@ def club_context(db: Any, club_name: str, squad_limit: int = 25) -> dict[str, An
     name = club.get("name") or club_name
     squad = squad_rows(db, name, max(1, min(60, int(squad_limit))))
     staff = []
+    staff_by_job: dict[str, int] = {}
     try:
-        for row in db.staff(name, 60) or []:
-            staff.append({"name": dict(row).get("name"),
-                          "job": dict(row).get("job"),
-                          "ca": as_int(dict(row).get("ca"), 0)})
+        for row in db.staff(name, 300) or []:
+            d = dict(row)
+            job_lbl = str(d.get("job") or "Staff")
+            staff_by_job[job_lbl] = staff_by_job.get(job_lbl, 0) + 1
+            staff.append({
+                "unique_id": as_int(d.get("unique_id") or d.get("id"), 0),
+                "name": d.get("name"),
+                "job": job_lbl,
+                "age": as_int(d.get("age"), 0),
+                "ca": as_int(d.get("ca"), 0),
+                "pa": as_int(d.get("pa"), 0),
+            })
     except Exception:  # noqa: BLE001
         staff = []
+        staff_by_job = {}
     fixture = None
     try:
         fixture = db.next_fixture(name)
@@ -230,7 +249,13 @@ def club_context(db: Any, club_name: str, squad_limit: int = 25) -> dict[str, An
             for player in squad
         ],
         "staff_count": len(staff),
-        "staff": staff[:12],
+        "staff_by_job": staff_by_job,
+        "staff": staff[:30],
+        "staff_note": (
+            f"Showing top {min(30, len(staff))} of {len(staff)} staff; "
+            "call fm27_find_staff(club=..., limit=150) to inspect ALL staff members, "
+            "live coaching/scouting attributes, and FM star ratings."
+        ),
         "next_fixture": dict(fixture) if fixture else None,
         "facility_scale": "FM's own 0-20 scale",
         "money_scale": "raw pounds",

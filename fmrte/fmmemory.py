@@ -46,9 +46,10 @@ from __future__ import annotations
 
 import os
 import struct
+import threading
 from dataclasses import dataclass, field
-from datetime import date
-from typing import Callable, Iterable
+from datetime import date, timedelta
+from typing import Any, Callable, Iterable
 
 from . import memmap as M
 from . import procmem
@@ -61,6 +62,7 @@ from .procmem import LiveError, ProcessMemory
 # Build id -> offset-table RVA inside game_plugin.dll.  The newest is tried
 # first; an unregistered build falls back to KNOWN_TABLE_RVAS then the scan.
 BUILD_TO_TABLE_RVA = {
+    2511875: 0x53f8cc0,  # Xbox / PC Game Pass 27.1.1+2511875 (verified live)
     2505117: 0x53faca0,  # Xbox / PC Game Pass 27.1.0+2505117 (verified live)
     2494687: 92407336,   # 0x5820628 (Steam 27.0.1)
     2493426: 91248104,   # 0x57055e8
@@ -68,6 +70,7 @@ BUILD_TO_TABLE_RVA = {
 }
 # Verified table RVAs across Steam & Xbox/Game Pass images (NativeModuleProfile).
 KNOWN_TABLE_RVAS = (
+    0x53F8CC0,  # Xbox / PC Game Pass 27.1.1+2511875
     0x5820628,  # Steam 27.0.1 / 2494687
     0x5683BD8,  # Xbox / PC Game Pass 2494687
     0x587B6D0,  # Steam 26620374
@@ -78,12 +81,14 @@ KNOWN_TABLE_RVAS = (
 LEGACY_TABLE_RVA = 91239912
 
 BUILD_TO_CURRENT_DATE_RVA = {
+    2511875: 0x539bd10,  # Xbox / PC Game Pass 27.1.1+2511875 (verified live)
     2505117: 0x53a4a30,  # Xbox / PC Game Pass 27.1.0+2505117 (verified live)
     2494687: 0x57ca3b8,
     2493426: 0x56af378,
     2486695: 0x56ad378,
 }
 KNOWN_DATE_RVAS = (
+    0x539bd10,  # Xbox / PC Game Pass 27.1.1+2511875
     0x57ca3b8,  # Steam 27.0.1 / 2494687
     0x56257c8,  # Xbox / PC Game Pass 2494687
     0x58268e0,  # Steam 26620374
@@ -92,15 +97,18 @@ KNOWN_DATE_RVAS = (
     0x53a4a30,  # Xbox / PC Game Pass 27.1.0+2505117
 )
 BUILD_TO_ALTERNATE_DATE_RVA = {
+    2511875: 0x53f9708,
     2494687: 0x539dd10,
 }
 BUILD_TO_HUMAN_MANAGER_RVA = {
+    2511875: 0x53e9158,  # Xbox / PC Game Pass 27.1.1+2511875 (verified live)
     2505117: 0x53eb138,  # Xbox / PC Game Pass 27.1.0+2505117 (verified live)
     2494687: 0x5810308,
     2493426: 0x56f52c8,
     2486695: 0x56f32c8,
 }
 KNOWN_HUMAN_MANAGER_RVAS = (
+    0x53e9158,  # Xbox / PC Game Pass 27.1.1+2511875
     0x5810308,  # Steam 27.0.1 / 2494687
     0x5672618,  # Xbox / PC Game Pass 2494687
     0x586cdf8,  # Steam 26620374
@@ -116,6 +124,11 @@ KNOWN_HUMAN_MANAGER_RVAS = (
 # :meth:`FmMemory._date_candidates`. Every read is validated before it is
 # believed.
 TABLE_TO_CURRENT_DATE_RVA = 0x57035e8 - 0x56ad378
+TABLE_TO_CURRENT_DATE_DELTAS = (
+    TABLE_TO_CURRENT_DATE_RVA,        # 0x56270 (27.0.x & 27.1.0)
+    0x53f8cc0 - 0x539bd10,            # 0x5cfb0 (27.1.1+2511875)
+    0x53f8cc0 - 0x53f9708,            # -0xa48 (secondary date mirror in 27.1.1)
+)
 TABLE_TO_HUMAN_MANAGER_RVA = 0x57035e8 - 0x56f32c8
 # Additional paired deltas observed on newer FM27 builds (e.g. 27.1.0+2505117
 # where table - manager = 0x53faca0 - 0x53eb138 = 0x0FB68), so both Steam and
@@ -270,6 +283,23 @@ class LivePlayer:
     current_reputation: int
     world_reputation: int
     display_name: str = ""
+    asking_price: int | None = None
+    salary_weekly_raw: int | None = None
+    salary_pa: int | None = None
+    contract_end_date: str | None = None
+    joined_club_date: str | None = None
+    transfer_listed: int | None = None
+    listed_for_loan: int | None = None
+    club: str | None = None
+    playing_club: str | None = None
+    loan_club: str | None = None
+    is_loaned_out: str | None = None
+    injured: int | None = None
+    injury: str | None = None
+    injury_start_date: str | None = None
+    injury_light_training_days_remaining: Any = None
+    injury_full_training_days_remaining: Any = None
+    injury_expected_return: str | None = None
 
 
 @dataclass
@@ -440,6 +470,8 @@ class FmMemory:
         self.best_score = 0
         self.scanned = False
         self.build: int | None = None
+        self._people_index: dict[int, int] = {}
+        self._people_index_lock = threading.Lock()
 
     # -- the attached process ------------------------------------------
     @property
@@ -883,19 +915,134 @@ class FmMemory:
                 code="read_failed")
         return list(struct.unpack(f"<{count}Q", raw))
 
-    def find_person(self, unique_id: int) -> int | None:
-        """The person object address for one unique id.
-
-        The people vector is the authority; the snapshot's recorded address is
-        only a hint, because the game moves its objects when it reloads a save.
-        """
+    def _build_people_index_locked(self) -> dict[int, int]:
+        index: dict[int, int] = {}
         for pointer in self.people_pointers():
             if pointer < 0x10000:
                 continue
             raw = self.read(pointer + REL_UNIQUE_ID, 4)
-            if raw and struct.unpack("<I", raw)[0] == unique_id:
+            if raw:
+                uid = struct.unpack("<I", raw)[0]
+                if uid:
+                    index[uid] = pointer
+        self._people_index = index
+        return index
+
+    def build_people_index(self) -> dict[int, int]:
+        """Scan the people vector once and cache ``{unique_id: person_ptr}``.
+
+        A live FM27 save holds ~100k+ people pointers; building this dict once
+        (~0.8s) turns every subsequent :meth:`find_person` lookup from an O(N)
+        linear scan into a single 4-byte O(1) verification read (~0.005ms).
+        """
+        with self._people_index_lock:
+            return self._build_people_index_locked()
+
+    def ensure_people_index(self) -> dict[int, int]:
+        """Return the cached people index, building it on first access."""
+        if self._people_index:
+            return self._people_index
+        with self._people_index_lock:
+            if self._people_index:
+                return self._people_index
+            return self._build_people_index_locked()
+
+    def invalidate_people_index(self) -> None:
+        with self._people_index_lock:
+            self._people_index.clear()
+
+    def find_person(self, unique_id: int) -> int | None:
+        """The person object address for one unique id.
+
+        Uses the cached ``{unique_id: pointer}`` index built from the live
+        people vector and verifies the 4-byte UID at ``pointer + REL_UNIQUE_ID``
+        so a moved/reloaded object transparently triggers one index rebuild.
+        """
+        target = int(unique_id)
+        if not target:
+            return None
+        index = self.ensure_people_index()
+        pointer = index.get(target)
+        if pointer:
+            raw = self.read(pointer + REL_UNIQUE_ID, 4)
+            if raw and struct.unpack("<I", raw)[0] == target:
                 return pointer
+            # Pointer moved (e.g. save reload): rebuild index once and re-check.
+            index = self.build_people_index()
+            pointer = index.get(target)
+            if pointer:
+                raw = self.read(pointer + REL_UNIQUE_ID, 4)
+                if raw and struct.unpack("<I", raw)[0] == target:
+                    return pointer
         return None
+
+    def _slot_pointers(self, slot_name: str, max_count: int = MAX_PEOPLE) -> list[int]:
+        """Read all object pointers from one offset-table collection slot."""
+        if not self.table_base or slot_name not in SLOTS:
+            return []
+        slot = self.u64(self.table_base + SLOTS[slot_name])
+        if not slot or slot < 0x10000:
+            return []
+        vector = self.u64(slot + TABLE_VECTOR_PTR)
+        if not vector or vector < 0x10000:
+            return []
+        head = self.read(vector, 16)
+        if not head or len(head) < 16:
+            return []
+        begin, end = struct.unpack("<QQ", head)
+        if not begin or not end or end <= begin or (end - begin) % 8:
+            return []
+        count = (end - begin) // 8
+        if count <= 0 or count > max_count:
+            return []
+        raw = self.read(begin, count * 8)
+        if not raw or len(raw) < count * 8:
+            return []
+        return list(struct.unpack(f"<{count}Q", raw[:count * 8]))
+
+    def read_nation_uid_map(self) -> dict[str, int]:
+        """Build ``{lower_nation_name: fm_unique_id}`` from live ``NationOffset``."""
+        mapping: dict[str, int] = {}
+        span = max(NATION_NAME_RELS) + 8
+        for pointer in self._slot_pointers("NationOffset", max_count=2000):
+            if pointer < 0x10000:
+                continue
+            head = self.read(pointer, span)
+            if not head or len(head) < span:
+                continue
+            uid = struct.unpack_from("<I", head, REL_UNIQUE_ID)[0]
+            if not uid:
+                continue
+            for offset in NATION_NAME_RELS:
+                name_ptr = struct.unpack_from("<Q", head, offset)[0]
+                if not name_ptr or name_ptr < 0x10000:
+                    continue
+                name = self._read_name_slot(name_ptr, NATION_NAME_LIMIT)
+                if name:
+                    mapping.setdefault(name.strip().lower(), uid)
+        return mapping
+
+    def read_club_uid_map(self) -> dict[str, int]:
+        """Build ``{lower_club_name: fm_unique_id}`` from live ``ClubOffset``."""
+        mapping: dict[str, int] = {}
+        span = max(CLUB_NAME_RELS) + 8
+        for pointer in self._slot_pointers("ClubOffset", max_count=200000):
+            if pointer < 0x10000:
+                continue
+            head = self.read(pointer, span)
+            if not head or len(head) < span:
+                continue
+            uid = struct.unpack_from("<I", head, REL_UNIQUE_ID)[0]
+            if not uid:
+                continue
+            for offset in CLUB_NAME_RELS:
+                name_ptr = struct.unpack_from("<Q", head, offset)[0]
+                if not name_ptr or name_ptr < 0x10000:
+                    continue
+                name = self._read_name_slot(name_ptr, CLUB_NAME_LIMIT)
+                if name:
+                    mapping.setdefault(name.strip().lower(), uid)
+        return mapping
 
     # -- extra live facts -------------------------------------------------
     def _date_candidates(self, build: int | None) -> list[int]:
@@ -920,7 +1067,7 @@ class FmMemory:
         unpaired known RVAs are only a last resort.
         """
         base = self.module_base
-        paired = self.table_base - TABLE_TO_CURRENT_DATE_RVA if self.table_base else 0
+        paired = [self.table_base - delta for delta in TABLE_TO_CURRENT_DATE_DELTAS] if self.table_base else []
         own: list[int] = []
         if build and build in BUILD_TO_CURRENT_DATE_RVA:
             own.append(base + BUILD_TO_CURRENT_DATE_RVA[build])
@@ -929,8 +1076,8 @@ class FmMemory:
             alternates.insert(0, base + BUILD_TO_ALTERNATE_DATE_RVA[build])
         known = [base + rva for rva in KNOWN_DATE_RVAS]
         if self.scanned:
-            return _unique_addresses([paired, *own, *known, *alternates])
-        return _unique_addresses([*own, *known, *alternates, paired])
+            return _unique_addresses([*paired, *own, *known, *alternates])
+        return _unique_addresses([*own, *known, *alternates, *paired])
 
     def read_game_date(self, build: int | None = None) -> str:
         """Best-effort live in-game date (``YYYY-MM-DD``), or empty string.
@@ -1007,19 +1154,37 @@ class FmMemory:
     def read_injury(self, reference: int) -> LiveInjury:
         """The injury behind one person's injury reference.
 
-        This is the same chain ``PlayerExporter.injuryStatus`` walks: the
-        person holds a reference, the reference's first qword is the item, and
-        the item carries the type, the start date and the two day counts.  A
-        broken link is *not* an error - a fit player and a half-written injury
-        both read as "no injury", because this is display data and must never
-        take a page down.
+        In FM27, ``person - 0x190`` points to a ``std::vector<Injury*>``
+        container ``{begin, end, cap}``.  A recovered player still keeps an
+        allocated empty vector (``begin == end``), which MUST read as fit
+        rather than injured.  When ``end > begin``, ``*begin`` is the active
+        ``Injury`` item carrying type pointer, start date and day counts.
+        Legacy single-pointer fixtures (where ``reference[0]`` is the item and
+        ``reference[8] == 0``) remain supported for unit tests.
         """
         if reference <= 0x10000:
             return LiveInjury(0, 0)
-        head = self.read(reference, 8)
-        if not head:
-            return LiveInjury(0, 0)
-        item = struct.unpack("<Q", head)[0]
+        vec = self.read(reference, 16)
+        item = 0
+        if vec and len(vec) >= 16:
+            beg, end = struct.unpack("<QQ", vec[:16])
+            if beg <= 0x10000:
+                return LiveInjury(0, 0)
+            if end == beg:
+                # Empty std::vector<Injury*> -> recovered / fit.
+                return LiveInjury(0, 0)
+            if end > beg and (end - beg) <= 512 and (end - beg) % 8 == 0:
+                item = self.u64(beg) or 0
+            elif end == 0:
+                # Single-pointer layout (legacy / unit-test fixture).
+                item = beg
+            else:
+                return LiveInjury(0, 0)
+        else:
+            head = self.read(reference, 8)
+            if not head:
+                return LiveInjury(0, 0)
+            item = struct.unpack("<Q", head)[0]
         if item <= 0x10000:
             return LiveInjury(0, 0)
         injury = LiveInjury(reference, item)
@@ -1039,10 +1204,221 @@ class FmMemory:
         if len(raw) >= M.INJURY_TYPE_REL + 8:
             type_pointer = struct.unpack_from("<Q", raw, M.INJURY_TYPE_REL)[0]
             if type_pointer > 0x10000:
-                injury.name = self.read_length_string(
-                    type_pointer + M.INJURY_TYPE_NAME_REL,
-                    INJURY_TYPE_NAME_LIMIT, STRING_UTF8)
+                # FM27 27.1.x stores a pointer to the localized length-prefixed
+                # string at type_pointer + 0x20; fall back to inline UTF-8 for
+                # older builds and unit-test fixtures.
+                name_ptr = self.u64(type_pointer + M.INJURY_TYPE_NAME_REL)
+                name = (
+                    self._read_name_slot(name_ptr, INJURY_TYPE_NAME_LIMIT)
+                    if name_ptr and 0x10000 < name_ptr < 0x7FFFFFFFFFFF else ""
+                )
+                if not name:
+                    name = self.read_length_string(
+                        type_pointer + M.INJURY_TYPE_NAME_REL,
+                        INJURY_TYPE_NAME_LIMIT, STRING_UTF8)
+                injury.name = name
         return injury
+
+    def read_club_finances(
+        self, club_name_cache: dict[int, str] | None = None
+    ) -> dict[str, dict[str, int]]:
+        """Read live club balance, transfer budget & payroll budget from ``ClubOffset``.
+
+        Detects the full vs base finance vtable dynamically via FM27's
+        ``full_vtable - base_vtable == 0x4D0`` invariant so it works across
+        every FM27 build without hardcoded vtable RVAs.
+        """
+        cptrs = self._slot_pointers("ClubOffset", max_count=200000)
+        if not cptrs:
+            return {}
+        vt_counts: dict[int, int] = {}
+        club_fblks: list[tuple[int, int, int]] = []
+        for cptr in cptrs:
+            if cptr < 0x10000:
+                continue
+            fblk = self.u64(cptr + M.CLUB_FINANCE_BLOCK_REL)
+            if not fblk or fblk < 0x10000:
+                continue
+            vt = self.u64(fblk)
+            if vt and vt > 0x10000:
+                vt_counts[vt] = vt_counts.get(vt, 0) + 1
+                club_fblks.append((cptr, fblk, vt))
+        full_vt = 0
+        for vt in vt_counts:
+            if (vt - M.CLUB_FINANCE_FULL_VTABLE_DELTA) in vt_counts:
+                full_vt = vt
+                break
+        if not full_vt:
+            return {}
+        name_cache = club_name_cache if club_name_cache is not None else {}
+        out: dict[str, dict[str, int]] = {}
+        for cptr, fblk, vt in club_fblks:
+            if vt != full_vt:
+                continue
+            fb = self.read(fblk, M.CLUB_FINANCE_FULL_BYTES)
+            if not fb or len(fb) < M.CLUB_FINANCE_FULL_BYTES:
+                continue
+            if cptr not in name_cache:
+                name_cache[cptr] = self._read_club_name(cptr)
+            cname = name_cache[cptr]
+            if not cname:
+                continue
+            bal = struct.unpack_from("<i", fb, M.CLUB_BALANCE_REL)[0]
+            tb = struct.unpack_from("<i", fb, M.CLUB_TRANSFER_BUDGET_REL)[0]
+            pb = struct.unpack_from("<i", fb, M.CLUB_PAYROLL_BUDGET_REL)[0]
+            out[cname.strip().lower()] = {
+                "balance": int(bal),
+                "transfer_budget": int(tb),
+                "payroll_budget": int(pb),
+            }
+        return out
+
+    def read_live_snapshot(
+        self,
+        known_ids: Iterable[int],
+        *,
+        game_date: str = "",
+        include_clubs: bool = True,
+        progress: Callable[[str, int, int], None] | None = None,
+    ) -> tuple[dict[int, LivePlayer], dict[str, dict[str, int]]]:
+        """Read full live state for known players + club finances using this handle.
+
+        Captures live CA/PA, condition, sharpness, jadedness, morale, asking
+        price, active injuries (zeroing recovered ones), contract end/joined
+        dates, weekly salary, transfer/loan listing flags, live owning & loan
+        clubs, and full-finance club balances & transfer budgets.
+        """
+        known = [int(x) for x in known_ids if x]
+        index = self.ensure_people_index()
+        base_date: date | None = None
+        if game_date and len(game_date) >= 10:
+            try:
+                base_date = date.fromisoformat(game_date[:10])
+            except ValueError:
+                base_date = None
+
+        team_club_cache: dict[int, str] = {}
+        club_name_cache: dict[int, str] = {}
+
+        def _club_from_team(tptr: int) -> str:
+            if not tptr or tptr < 0x10000:
+                return ""
+            if tptr in team_club_cache:
+                return team_club_cache[tptr]
+            cptr = self.u64(tptr + M.TEAM_CLUB_REL)
+            if not cptr or cptr < 0x10000:
+                team_club_cache[tptr] = ""
+                return ""
+            if cptr not in club_name_cache:
+                club_name_cache[cptr] = self._read_club_name(cptr)
+            cname = club_name_cache[cptr]
+            team_club_cache[tptr] = cname
+            return cname
+
+        found: dict[int, LivePlayer] = {}
+        total = len(known)
+        for i, uid in enumerate(known):
+            if progress and i % 5000 == 0:
+                progress("Reading live players", i, total)
+            ptr = index.get(uid)
+            if not ptr:
+                continue
+            block = self.read(ptr - BLOCK_BEFORE, BLOCK_SIZE)
+            if not block or len(block) < BLOCK_SIZE:
+                continue
+            rec = decode_record(block)
+            if not rec or rec.unique_id != uid:
+                continue
+
+            # Live asking price / display value
+            val_raw = struct.unpack_from(
+                "<I", block, BLOCK_BEFORE + M.DIRECT_FIELDS["asking_price_raw"][0]
+            )[0]
+            if 0 < val_raw < 2_000_000_000:
+                rec.asking_price = int(val_raw)
+
+            # Live injury state (clears recovered snapshot injuries!)
+            inj_ref = struct.unpack_from(
+                "<Q", block, BLOCK_BEFORE + M.INJURY_REFERENCE_REL
+            )[0]
+            if inj_ref > 0x10000:
+                inj = self.read_injury(inj_ref)
+            else:
+                inj = LiveInjury(0, 0)
+            if inj.injured:
+                rec.injured = 1
+                rec.injury = inj.name or "Injured"
+                rec.injury_start_date = inj.start_date
+                rec.injury_light_training_days_remaining = inj.light_training_days
+                rec.injury_full_training_days_remaining = inj.full_training_days
+                if inj.full_training_days > 0:
+                    anchor = base_date
+                    if anchor is None and inj.start_date:
+                        try:
+                            anchor = date.fromisoformat(inj.start_date[:10])
+                        except ValueError:
+                            anchor = None
+                    if anchor is not None:
+                        rec.injury_expected_return = (
+                            anchor + timedelta(days=inj.full_training_days)
+                        ).isoformat()
+                else:
+                    rec.injury_expected_return = ""
+            else:
+                rec.injured = 0
+                rec.injury = ""
+                rec.injury_start_date = ""
+                rec.injury_light_training_days_remaining = ""
+                rec.injury_full_training_days_remaining = ""
+                rec.injury_expected_return = ""
+
+            # Live registration (owning club, contract, wage, transfer/loan list)
+            reg = struct.unpack_from(
+                "<Q", block, BLOCK_BEFORE + M.REGISTRATION_POINTER_REL
+            )[0]
+            own_name = ""
+            if reg > 0x10000:
+                rb = self.read(reg, 96)
+                if rb and len(rb) >= 96:
+                    salary = struct.unpack_from("<I", rb, M.SALARY_WEEKLY_REL)[0]
+                    if salary < 50_000_000:
+                        rec.salary_weekly_raw = int(salary)
+                        rec.salary_pa = round(salary * 52 / 1000) * 1000
+                    cend = decode_date(rb, M.CONTRACT_DATE_REL)
+                    if cend:
+                        rec.contract_end_date = cend
+                    jdate = decode_date(rb, M.JOINED_DATE_REL)
+                    if jdate:
+                        rec.joined_club_date = jdate
+                    tstat = rb[M.TRANSFER_STATUS_REL]
+                    rec.transfer_listed = 1 if tstat == 1 else 0
+                    rec.listed_for_loan = 1 if tstat == 2 else 0
+                    own_team = struct.unpack_from("<Q", rb, M.REGISTRATION_CLUB_REL)[0]
+                    own_name = _club_from_team(own_team)
+
+            # Live playing club & loan status
+            play_team = struct.unpack_from(
+                "<Q", block, BLOCK_BEFORE + M.PLAYING_CLUB_REF_REL
+            )[0]
+            play_name = _club_from_team(play_team)
+            if own_name or play_name:
+                if own_name and play_name and own_name != play_name:
+                    rec.club = own_name
+                    rec.playing_club = play_name
+                    rec.loan_club = play_name
+                    rec.is_loaned_out = "yes"
+                else:
+                    eff = own_name or play_name
+                    rec.club = eff
+                    rec.playing_club = eff
+                    rec.loan_club = ""
+                    rec.is_loaned_out = "no"
+
+            found[uid] = rec
+        if progress:
+            progress("Reading live players", total, total)
+        club_fin = self.read_club_finances(club_name_cache) if include_clubs else {}
+        return found, club_fin
 
     # -- the in-game current screen --------------------------------------
     def _read_name_slot(self, pointer: int, limit: int = PERSON_NAME_LIMIT) -> str:
@@ -1305,35 +1681,11 @@ def read_live(known_ids: Iterable[int],
     known = {int(x) for x in known_ids if x}
     game, report = open_game(progress)
     try:
-        start, _end, count = game.people_bounds()
+        _start, _end, count = game.people_bounds()
         report.table_count = count
-        raw = game.read(start, count * 8)
-        if not raw:
-            raise LiveError(
-                "The player list could not be read.",
-                "Start this editor as administrator and try again.",
-                code="read_failed")
-        pointers = struct.unpack(f"<{count}Q", raw)
-        found: dict[int, LivePlayer] = {}
-        for index, pointer in enumerate(pointers):
-            if progress and index % 5000 == 0:
-                progress("Reading players", index, count)
-            if pointer < 0x10000:
-                continue
-            uid_raw = game.read(pointer + REL_UNIQUE_ID, 4)
-            if not uid_raw:
-                continue
-            uid = struct.unpack("<I", uid_raw)[0]
-            if uid not in known:
-                continue
-            block = game.read(pointer - BLOCK_BEFORE, BLOCK_SIZE)
-            if not block:
-                continue
-            record = decode_record(block)
-            if record and record.unique_id in known:
-                found[record.unique_id] = record
-        if progress:
-            progress("Reading players", count, count)
+        found, _club_fin = game.read_live_snapshot(
+            known, game_date=report.game_date, include_clubs=False, progress=progress
+        )
         report.ok = True
         report.matched = len(found)
         report.players = found

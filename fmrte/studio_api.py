@@ -13,6 +13,7 @@ import json
 import mimetypes
 import os
 import queue
+import re
 import secrets
 import threading
 import time
@@ -22,7 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from . import assistant as A
-from . import fmplans, fmtools, ratings, spec, tacticslab, tacticweb
+from . import fmplans, fmtools, ratings, spec, staffratings, tacticslab, tacticweb
 from .db import DATE_COLUMNS, SQUAD_COLUMNS, Snapshot
 
 DEFAULT_CLUB = "Milan"
@@ -56,9 +57,11 @@ def _studio_prefs_path() -> str:
 
 
 def _detect_graphics_dir(preferred: str = "") -> str:
-    candidates: list[str] = []
     if preferred and preferred.strip():
-        candidates.append(preferred.strip())
+        pref = preferred.strip()
+        if os.path.isdir(pref):
+            return pref
+    candidates: list[str] = []
     env_dir = os.environ.get("FMRTE_GRAPHICS_DIR", "").strip()
     if env_dir:
         candidates.append(env_dir)
@@ -83,15 +86,137 @@ def _detect_graphics_dir(preferred: str = "") -> str:
     return preferred.strip() if preferred else ""
 
 
+_CONFIG_XML_SKIP_DIRS = frozenset({
+    "faces", "iconfaces", "kits", "players", "trophies",
+    "backgrounds", "skins", "stadiums", "2d", "3d", "panels",
+})
+_CONFIG_RECORD_RE = re.compile(
+    r'<record\b([^>]+)/?>', re.IGNORECASE,
+)
+_ATTR_FROM_RE = re.compile(r'\bfrom="([^"]+)"', re.IGNORECASE)
+_ATTR_TO_RE = re.compile(
+    r'\bto="graphics/pictures/(club|nation)/(\d+)/(logo|icon|normal|small)"',
+    re.IGNORECASE,
+)
+_CLUB_PREFIX_RE = re.compile(
+    r"^(?:ac|fc|sc|as|ss|us|cf|cd|rc|rcd|sd|ud|fk|sk|nk|sv|vfl|vfb|tsg|rb|afc|ogc|osc)\s+",
+    re.IGNORECASE,
+)
+_CLUB_SUFFIX_RE = re.compile(
+    r"\s+(?:fc|cf|sc|ac|fk|sk|afc|bc|calcio)$",
+    re.IGNORECASE,
+)
+_CLUB_NAME_ALIASES: dict[str, tuple[str, ...]] = {
+    "ac milan": ("milan",),
+    "milan": ("ac milan",),
+    "inter milan": ("inter", "internazionale", "fc internazionale milano"),
+    "inter": ("internazionale", "inter milan", "fc internazionale milano"),
+    "man city": ("manchester city", "manchester city fc"),
+    "man utd": ("manchester united", "manchester united fc"),
+    "manchester utd": ("manchester united", "manchester united fc"),
+    "spurs": ("tottenham hotspur", "tottenham"),
+    "wolves": ("wolverhampton wanderers", "wolverhampton"),
+    "psg": ("paris saint-germain", "paris sg"),
+    "bayern": ("fc bayern münchen", "fc bayern munich", "bayern munich"),
+    "barca": ("fc barcelona", "barcelona"),
+    "atletico madrid": ("atlético de madrid", "atlético madrid", "atletico de madrid"),
+}
+_NATION_NAME_ALIASES: dict[str, tuple[str, ...]] = {
+    "中国": ("中华人民共和国", "china pr", "china"),
+    "中华人民共和国": ("中国", "china pr", "china"),
+    "美国": ("美利坚合众国", "u.s.a.", "usa", "united states"),
+    "美利坚合众国": ("美国", "u.s.a.", "usa", "united states"),
+    "韩国": ("大韩民国", "south korea", "korea republic"),
+    "朝鲜": ("朝鲜民主主义人民共和国", "north korea"),
+    "捷克": ("捷克共和国", "czech republic", "czechia"),
+    "捷克共和国": ("捷克", "czechia", "czech republic"),
+    "荷兰": ("尼德兰", "netherlands", "holland"),
+    "英格兰": ("england",),
+    "意大利": ("italy",),
+    "西班牙": ("spain",),
+    "德国": ("germany",),
+    "法国": ("france",),
+    "巴西": ("brazil",),
+    "阿根廷": ("argentina",),
+    "葡萄牙": ("portugal",),
+}
+
+
+def _entity_uids_cache_path() -> str:
+    return os.path.join(A.data_directory(), "entity_uids.json")
+
+
 class _FaceResolver:
-    """Fast O(1) resolver for local FM27 facepack portraits (``faces/<uid>.png``)."""
+    """Fast O(1) resolver for FM27 facepacks, club logos, and nation flags."""
 
     def __init__(self, graphics_dir: str = ""):
         self._lock = threading.Lock()
+        self._logo_lock = threading.Lock()
         self._cache: dict[int, str | None] = {}
+        self._club_logo_cache: dict[str, str | None] = {}
+        self._nation_logo_cache: dict[str, str | None] = {}
+        self._club_logos: dict[int, str] = {}
+        self._nation_logos: dict[int, str] = {}
+        self._club_uids: dict[str, int] = {}
+        self._nation_uids: dict[str, int] = {}
+        self._logo_index_ready = False
         self.graphics_dir = ""
         self._search_dirs: list[str] = []
+        self._load_entity_uids()
         self.configure(graphics_dir)
+
+    def _load_entity_uids(self) -> None:
+        try:
+            with open(_entity_uids_cache_path(), "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            if isinstance(data, dict):
+                clubs = data.get("clubs")
+                nations = data.get("nations")
+                if isinstance(clubs, dict):
+                    self._club_uids = {str(k).strip().lower(): int(v) for k, v in clubs.items() if k and v}
+                if isinstance(nations, dict):
+                    self._nation_uids = {str(k).strip().lower(): int(v) for k, v in nations.items() if k and v}
+        except (OSError, ValueError, TypeError):
+            pass
+
+    def _save_entity_uids(self) -> None:
+        try:
+            path = _entity_uids_cache_path()
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {"clubs": self._club_uids, "nations": self._nation_uids},
+                    handle, ensure_ascii=False, separators=(",", ":"),
+                )
+            os.replace(tmp, path)
+        except OSError:
+            pass
+
+    def warm_entity_uids_from_game(self, game: Any) -> tuple[int, int]:
+        """Populate club & nation UID maps from live FM27 memory and persist cache."""
+        nations: dict[str, int] = {}
+        clubs: dict[str, int] = {}
+        try:
+            if hasattr(game, "read_nation_uid_map"):
+                nations = game.read_nation_uid_map() or {}
+        except Exception:  # noqa: BLE001
+            nations = {}
+        try:
+            if hasattr(game, "read_club_uid_map"):
+                clubs = game.read_club_uid_map() or {}
+        except Exception:  # noqa: BLE001
+            clubs = {}
+        if nations or clubs:
+            with self._lock:
+                if nations:
+                    self._nation_uids.update(nations)
+                    self._nation_logo_cache.clear()
+                if clubs:
+                    self._club_uids.update(clubs)
+                    self._club_logo_cache.clear()
+            self._save_entity_uids()
+        return len(clubs), len(nations)
 
     def configure(self, graphics_dir: str = "") -> None:
         resolved = _detect_graphics_dir(graphics_dir)
@@ -105,6 +230,82 @@ class _FaceResolver:
             self.graphics_dir = resolved
             self._search_dirs = dirs
             self._cache.clear()
+            self._club_logo_cache.clear()
+            self._nation_logo_cache.clear()
+        with self._logo_lock:
+            self._club_logos.clear()
+            self._nation_logos.clear()
+            self._logo_index_ready = False
+
+    def ensure_logo_index(self) -> None:
+        """Index ``config.xml`` club/nation logo mappings under ``graphics_dir`` once."""
+        if self._logo_index_ready:
+            return
+        with self._logo_lock:
+            if self._logo_index_ready:
+                return
+            root_dir = self.graphics_dir
+            club_map: dict[int, str] = {}
+            club_prio: dict[int, int] = {}
+            nation_map: dict[int, str] = {}
+            nation_prio: dict[int, int] = {}
+            if root_dir and os.path.isdir(root_dir):
+                for cur, dirnames, filenames in os.walk(root_dir):
+                    dirnames[:] = [
+                        d for d in dirnames
+                        if d.lower() not in _CONFIG_XML_SKIP_DIRS and not d.startswith(".")
+                    ]
+                    cfg_name = next((f for f in filenames if f.lower() == "config.xml"), None)
+                    if not cfg_name:
+                        continue
+                    cfg_path = os.path.join(cur, cfg_name)
+                    try:
+                        with open(cfg_path, "r", encoding="utf-8", errors="ignore") as handle:
+                            text = handle.read()
+                    except OSError:
+                        continue
+                    if "graphics/pictures/" not in text.lower():
+                        continue
+                    file_lookup = {os.path.splitext(f)[0].lower(): f for f in filenames
+                                   if f.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))}
+                    for rec_m in _CONFIG_RECORD_RE.finditer(text):
+                        attrs = rec_m.group(1)
+                        to_m = _ATTR_TO_RE.search(attrs)
+                        if not to_m:
+                            continue
+                        from_m = _ATTR_FROM_RE.search(attrs)
+                        if not from_m:
+                            continue
+                        kind = to_m.group(1).lower()
+                        uid = int(to_m.group(2))
+                        variant = to_m.group(3).lower()
+                        prio = 2 if variant in ("logo", "normal") else 1
+                        rel_from = from_m.group(1).strip().replace("\\", "/")
+                        if "/" in rel_from:
+                            base_p = os.path.join(cur, *rel_from.split("/"))
+                            resolved_file = None
+                            for ext in ("", ".png", ".jpg", ".webp"):
+                                cand = base_p + ext
+                                if os.path.isfile(cand):
+                                    resolved_file = cand
+                                    break
+                        else:
+                            stem = os.path.splitext(rel_from)[0].lower()
+                            fname = file_lookup.get(stem)
+                            resolved_file = os.path.join(cur, fname) if fname else None
+                        if not resolved_file:
+                            continue
+                        if kind == "club":
+                            if prio > club_prio.get(uid, 0):
+                                club_map[uid] = resolved_file
+                                club_prio[uid] = prio
+                        else:
+                            if prio > nation_prio.get(uid, 0):
+                                nation_map[uid] = resolved_file
+                                nation_prio[uid] = prio
+            self._club_logos = club_map
+            self._nation_logos = nation_map
+            self._logo_index_ready = True
 
     @property
     def available(self) -> bool:
@@ -134,6 +335,103 @@ class _FaceResolver:
             if len(self._cache) > 8192:
                 self._cache.clear()
             self._cache[uid] = found
+        return found
+
+    def _direct_logo_file(self, uid: int, subdirs: tuple[str, ...]) -> str | None:
+        root = self.graphics_dir
+        if not uid or not root or not os.path.isdir(root):
+            return None
+        for sub in subdirs:
+            folder = os.path.join(root, sub)
+            if not os.path.isdir(folder):
+                continue
+            for ext in (".png", ".jpg", ".webp"):
+                cand = os.path.join(folder, f"{uid}{ext}")
+                if os.path.isfile(cand):
+                    return cand
+        return None
+
+    def _lookup_club_uid(self, name: str) -> int | None:
+        raw = (name or "").strip()
+        if not raw:
+            return None
+        disp = Snapshot.display_club(raw).strip()
+        candidates: list[str] = []
+        for s in (raw, disp):
+            low = s.lower()
+            if low and low not in candidates:
+                candidates.append(low)
+            for alias in _CLUB_NAME_ALIASES.get(low, ()):
+                if alias not in candidates:
+                    candidates.append(alias)
+            stripped = _CLUB_PREFIX_RE.sub("", low).strip()
+            if stripped and stripped not in candidates:
+                candidates.append(stripped)
+            stripped2 = _CLUB_SUFFIX_RE.sub("", stripped).strip()
+            if stripped2 and stripped2 not in candidates:
+                candidates.append(stripped2)
+        with self._lock:
+            for key in candidates:
+                uid = self._club_uids.get(key)
+                if uid:
+                    return uid
+        return None
+
+    def _lookup_nation_uid(self, name: str) -> int | None:
+        raw = (name or "").strip()
+        if not raw:
+            return None
+        low = raw.lower()
+        candidates = [low, *_NATION_NAME_ALIASES.get(low, ())]
+        if raw.endswith("共和国") and len(raw) > 3:
+            candidates.append(raw[:-3].lower())
+        with self._lock:
+            for key in candidates:
+                uid = self._nation_uids.get(key)
+                if uid:
+                    return uid
+        return None
+
+    def resolve_club(self, name: str = "", *, uid: int | None = None) -> str | None:
+        if not self.graphics_dir:
+            return None
+        self.ensure_logo_index()
+        cache_key = f"uid:{uid}" if uid else f"name:{(name or '').strip().lower()}"
+        with self._lock:
+            if cache_key in self._club_logo_cache:
+                return self._club_logo_cache[cache_key]
+        target_uid = int(uid) if uid else self._lookup_club_uid(name)
+        found: str | None = None
+        if target_uid:
+            found = self._club_logos.get(target_uid) or self._direct_logo_file(
+                target_uid, ("logos", "clubs", "pictures/club", "pictures/logos"),
+            )
+        if found or self._club_uids:
+            with self._lock:
+                if len(self._club_logo_cache) > 8192:
+                    self._club_logo_cache.clear()
+                self._club_logo_cache[cache_key] = found
+        return found
+
+    def resolve_nation(self, name: str = "", *, uid: int | None = None) -> str | None:
+        if not self.graphics_dir:
+            return None
+        self.ensure_logo_index()
+        cache_key = f"uid:{uid}" if uid else f"name:{(name or '').strip().lower()}"
+        with self._lock:
+            if cache_key in self._nation_logo_cache:
+                return self._nation_logo_cache[cache_key]
+        target_uid = int(uid) if uid else self._lookup_nation_uid(name)
+        found: str | None = None
+        if target_uid:
+            found = self._nation_logos.get(target_uid) or self._direct_logo_file(
+                target_uid, ("flags", "nations", "pictures/nation", "Others/Federations"),
+            )
+        if found or self._nation_uids:
+            with self._lock:
+                if len(self._nation_logo_cache) > 2048:
+                    self._nation_logo_cache.clear()
+                self._nation_logo_cache[cache_key] = found
         return found
 
 
@@ -175,6 +473,212 @@ _ATTRIBUTE_GROUPS = (
 )
 
 
+_STAFF_ATTRIBUTE_GROUPS = (
+    ("Coaching", [
+        ("Attacking", "attacking"),
+        ("Defending", "defending"),
+        ("Fitness", "fitness"),
+        ("Mental", "mental"),
+        ("Tactical", "tactical"),
+        ("Technical", "technical"),
+        ("Working With Youngsters", "working_with_youngsters"),
+        ("Set Pieces", "set_pieces"),
+    ]),
+    ("Goalkeeping", [
+        ("GK Shot Stopping", "gk_shot_stopping"),
+        ("GK Distribution", "gk_distribution"),
+        ("GK Handling", "gk_handling"),
+    ]),
+    ("Mental", [
+        ("Adaptability", "adaptability"),
+        ("Determination", "determination"),
+        ("Level of Discipline", "level_of_discipline"),
+        ("Man Management", "man_management"),
+        ("Motivating", "motivating"),
+        ("Tactical Knowledge", "tactical_knowledge"),
+    ]),
+    ("Scouting & Medical", [
+        ("Judging Player Ability", "judging_player_ability"),
+        ("Judging Player Potential", "judging_player_potential"),
+        ("Judging Staff Ability", "judging_staff_ability"),
+        ("Negotiating", "negotiating"),
+        ("Physiotherapy", "physiotherapy"),
+        ("Sports Science", "sports_science"),
+        ("Analysing Data", "analysing_data"),
+    ]),
+    ("Personality", [
+        ("Ambition", "ambition"),
+        ("Loyalty", "loyalty"),
+        ("Pressure", "pressure"),
+        ("Professionalism", "professionalism"),
+        ("Sportsmanship", "sportsmanship"),
+        ("Temperament", "temperament"),
+        ("Controversy", "controversy"),
+    ]),
+)
+
+_STAFF_ALL_ATTR_COLS = frozenset(
+    col for _, fields in _STAFF_ATTRIBUTE_GROUPS for _, col in fields
+)
+
+
+def _chat_sessions_path() -> str:
+    return os.path.join(A.data_directory(), "chat_sessions.json")
+
+
+class _ChatSessionStore:
+    """Thread-safe persistent multi-session AI chat history store."""
+
+    def __init__(self, path: str | None = None):
+        self._lock = threading.RLock()
+        self.path = path or _chat_sessions_path()
+        self.active_id: str = ""
+        self.sessions: list[dict[str, Any]] = []
+        self._load()
+
+    def _new_empty(self, title: str = "New Chat") -> dict[str, Any]:
+        now = int(time.time())
+        return {
+            "id": secrets.token_hex(6),
+            "title": title,
+            "created_at": now,
+            "updated_at": now,
+            "turns": [],
+        }
+
+    def _load(self) -> None:
+        with self._lock:
+            try:
+                with open(self.path, "r", encoding="utf-8") as handle:
+                    data = json.load(handle)
+                if isinstance(data, dict) and isinstance(data.get("sessions"), list):
+                    self.sessions = [s for s in data["sessions"] if isinstance(s, dict) and s.get("id")]
+                    self.active_id = str(data.get("active_id") or "")
+            except (OSError, ValueError):
+                self.sessions = []
+                self.active_id = ""
+            if not self.sessions:
+                first = self._new_empty("New Chat")
+                self.sessions = [first]
+                self.active_id = first["id"]
+            elif not any(s["id"] == self.active_id for s in self.sessions):
+                self.active_id = self.sessions[0]["id"]
+
+    def _save(self) -> None:
+        with self._lock:
+            try:
+                os.makedirs(os.path.dirname(self.path), exist_ok=True)
+                tmp = self.path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as handle:
+                    json.dump(
+                        {"active_id": self.active_id, "sessions": self.sessions[:40]},
+                        handle, ensure_ascii=False, indent=1, default=str,
+                    )
+                os.replace(tmp, self.path)
+            except OSError:
+                pass
+
+    def active_session(self) -> dict[str, Any]:
+        with self._lock:
+            cur = next((s for s in self.sessions if s["id"] == self.active_id), None)
+            if cur is None:
+                cur = self._new_empty("New Chat")
+                self.sessions.insert(0, cur)
+                self.active_id = cur["id"]
+                self._save()
+            return cur
+
+    def list_payload(self) -> dict[str, Any]:
+        with self._lock:
+            cur = self.active_session()
+            ordered = sorted(self.sessions, key=lambda s: int(s.get("updated_at") or 0), reverse=True)
+            return {
+                "ok": True,
+                "active_id": cur["id"],
+                "active": {
+                    "id": cur["id"],
+                    "title": cur.get("title") or "New Chat",
+                    "turns": list(cur.get("turns") or []),
+                },
+                "sessions": [
+                    {
+                        "id": s["id"],
+                        "title": s.get("title") or "New Chat",
+                        "updated_at": int(s.get("updated_at") or 0),
+                        "turn_count": len(s.get("turns") or []),
+                    }
+                    for s in ordered
+                ],
+            }
+
+    def create_session(self, title: str = "New Chat") -> dict[str, Any]:
+        with self._lock:
+            cur = self.active_session()
+            # Reuse current session if it is already empty
+            if not (cur.get("turns") or []):
+                return self.list_payload()
+            sess = self._new_empty(title or "New Chat")
+            self.sessions.insert(0, sess)
+            self.active_id = sess["id"]
+            self._save()
+            return self.list_payload()
+
+    def select_session(self, session_id: str) -> dict[str, Any]:
+        with self._lock:
+            sid = (session_id or "").strip()
+            found = next((s for s in self.sessions if s["id"] == sid), None)
+            if found is None:
+                return {"ok": False, "error": "Chat session not found."}
+            self.active_id = found["id"]
+            self._save()
+            return self.list_payload()
+
+    def delete_session(self, session_id: str) -> dict[str, Any]:
+        with self._lock:
+            sid = (session_id or "").strip() or self.active_id
+            self.sessions = [s for s in self.sessions if s["id"] != sid]
+            if not self.sessions:
+                fresh = self._new_empty("New Chat")
+                self.sessions = [fresh]
+                self.active_id = fresh["id"]
+            elif self.active_id == sid:
+                self.sessions.sort(key=lambda s: int(s.get("updated_at") or 0), reverse=True)
+                self.active_id = self.sessions[0]["id"]
+            self._save()
+            return self.list_payload()
+
+    def clear_active(self) -> dict[str, Any]:
+        with self._lock:
+            cur = self.active_session()
+            cur["turns"] = []
+            cur["title"] = "New Chat"
+            cur["updated_at"] = int(time.time())
+            self._save()
+            return self.list_payload()
+
+    def append_turns(self, user_turn: dict[str, Any], assistant_turn: dict[str, Any]) -> None:
+        with self._lock:
+            cur = self.active_session()
+            turns = cur.setdefault("turns", [])
+            if not turns or cur.get("title") in ("", "New Chat"):
+                raw_t = str(user_turn.get("text") or "").strip()
+                if raw_t:
+                    cur["title"] = (raw_t[:36] + "…") if len(raw_t) > 36 else raw_t
+            # Strip heavy base64 image payloads from persisted attachments to keep file compact
+            u_clean = dict(user_turn)
+            if isinstance(u_clean.get("attachments"), list):
+                u_clean["attachments"] = [
+                    {"kind": a.get("kind"), "name": a.get("name")}
+                    for a in u_clean["attachments"] if isinstance(a, dict)
+                ]
+            turns.append(u_clean)
+            turns.append(assistant_turn)
+            if len(turns) > 120:
+                cur["turns"] = turns[-120:]
+            cur["updated_at"] = int(time.time())
+            self._save()
+
+
 def _money(value: Any) -> str:
     try:
         num = int(value or 0)
@@ -199,7 +703,69 @@ def _opt_int(value: Any) -> int | None:
         return None
 
 
-def _player_summary(row: dict[str, Any]) -> dict[str, Any]:
+# Tactical position order: GK -> CB -> FB/WB -> DM -> CM -> Wingers/Wide Mid -> AM -> ST
+_POSITION_SORT_ORDER: tuple[tuple[str, int], ...] = (
+    ("goalkeeper", 10),
+    ("defender_central", 20),
+    ("sweeper", 21),
+    ("defender_left", 30),
+    ("defender_right", 31),
+    ("wing_back_left", 32),
+    ("wing_back_right", 33),
+    ("defensive_midfielder", 40),
+    ("midfielder_central", 50),
+    ("attacking_midfielder_left", 60),
+    ("attacking_midfielder_right", 61),
+    ("midfielder_left", 62),
+    ("midfielder_right", 63),
+    ("attacking_midfielder_central", 70),
+    ("striker", 80),
+)
+
+
+def _position_sort_rank(row: dict[str, Any]) -> int:
+    """Numeric tactical rank for position sorting (GK -> CB -> FB/WB -> DM -> CM -> Winger -> AM -> ST)."""
+    best_val = -1
+    best_rank = 99
+    for col, rank in _POSITION_SORT_ORDER:
+        val = int(row.get(col) or 0)
+        if val > best_val:
+            best_val = val
+            best_rank = rank
+    return best_rank
+
+
+def _loan_info(row: dict[str, Any], club_context: str = "") -> tuple[str, str, str]:
+    """Return ``(loan_status, parent_club, loan_to_club)`` relative to ``club_context``.
+
+    ``loan_status`` is ``"in"`` (loaned in to this club), ``"out"`` (owned by this club
+    and loaned out elsewhere), or ``""`` (regular squad player).
+    """
+    own = str(row.get("club") or "").strip()
+    playing = str(row.get("playing_club") or "").strip()
+    loan_club = str(row.get("loan_club") or "").strip()
+    is_out = str(row.get("is_loaned_out") or "").strip().lower() in ("yes", "1", "true")
+    ctx = (club_context or "").strip().lower()
+    if ctx:
+        if (playing.lower() == ctx or loan_club.lower() == ctx) and own.lower() != ctx:
+            return "in", Snapshot.display_club(own), Snapshot.display_club(playing or loan_club)
+        if own.lower() == ctx and (
+            is_out
+            or (playing and playing.lower() != ctx)
+            or (loan_club and loan_club.lower() != ctx)
+        ):
+            dest = loan_club or playing
+            return "out", Snapshot.display_club(own), Snapshot.display_club(dest)
+        return "", Snapshot.display_club(own), ""
+    if is_out or (playing and own and playing.lower() != own.lower()):
+        return "out", Snapshot.display_club(own), Snapshot.display_club(loan_club or playing)
+    return "", Snapshot.display_club(own), ""
+
+
+def _player_summary(row: dict[str, Any], club_context: str = "") -> dict[str, Any]:
+    loan_status, parent_club, loan_to = _loan_info(row, club_context=club_context)
+    has_attrs = "finishing" in row or "reflexes" in row
+    rating_val = round(Snapshot.rating(row), 2) if has_attrs else None
     return {
         "id": row.get("id"),
         "unique_id": int(row.get("unique_id") or 0),
@@ -207,10 +773,16 @@ def _player_summary(row: dict[str, Any]) -> dict[str, Any]:
         "full_name": row.get("name") or "",
         "club": Snapshot.display_club(row.get("club")),
         "club_raw": row.get("club") or "",
+        "playing_club": Snapshot.display_club(row.get("playing_club") or row.get("club")),
+        "loan_status": loan_status,
+        "loan_from": parent_club if loan_status == "in" else "",
+        "loan_to": loan_to if loan_status == "out" else "",
         "age": Snapshot.age(row),
         "nationality": row.get("nationality") or "—",
         "pos": Snapshot.position_text(row),
+        "pos_rank": _position_sort_rank(row),
         "role": Snapshot.role_name(row),
+        "rating": rating_val,
         "ca": int(row.get("ca") or 0),
         "pa": int(row.get("pa") or 0),
         "morale": row.get("morale"),
@@ -276,11 +848,30 @@ class StudioBackend:
         self.settings = A.AssistantSettings.load()
         self.keys = A.KeyStore()
         self.conversation = A.Conversation()
+        self.chat_store = _ChatSessionStore()
+        self._sync_conversation_from_active_session()
         self._attach_lock = threading.Lock()
+        self._live_sync_ready = threading.Event()
+        self._staff_live_cache: dict[int, dict[str, Any]] = {}
         self._prefs = _load_studio_prefs()
         self.faces = _FaceResolver(str(self._prefs.get("graphics_dir") or ""))
         self.lab = tacticslab.TacticsLabClient(str(self._prefs.get("lab_dir") or ""))
         fmtools.set_lab_client(self.lab)
+        if self.faces.graphics_dir:
+            threading.Thread(
+                target=self.faces.ensure_logo_index,
+                name="fm27-logo-index",
+                daemon=True,
+            ).start()
+
+    def _sync_conversation_from_active_session(self) -> None:
+        cur = self.chat_store.active_session()
+        self.conversation.clear()
+        for t in (cur.get("turns") or []):
+            role = t.get("role")
+            text = str(t.get("text") or "")
+            if role in ("user", "assistant") and text:
+                self.conversation.add(role, text, failed=bool(t.get("error")))
 
     def close(self) -> None:
         try:
@@ -334,7 +925,8 @@ class StudioBackend:
                 for g, fields in _ATTRIBUTE_GROUPS
             ],
             "positions": [{"label": p.label, "column": p.column} for p in spec.POSITIONS],
-            "staff_jobs": self.db.staff_jobs(25),
+            "staff_jobs": self.db.staff_jobs(30),
+            "staff_categories": staffratings.categories_catalogue(),
             "default_players": top_players[:5],
             "ai": self.ai_settings_payload(),
         }
@@ -342,7 +934,7 @@ class StudioBackend:
     # -- live attach / detach ---------------------------------------------
     def attach_game(self, *, refresh_all: bool = False) -> dict[str, Any]:
         with self._attach_lock:
-            from . import fmmemory, livewrite
+            from . import livewrite
 
             try:
                 editor, report = livewrite.LiveEditor.attach()
@@ -355,34 +947,119 @@ class StudioBackend:
                 }
 
             records = None
+            club_finances = None
+            sync_err = ""
             if refresh_all:
+                self._live_sync_ready.clear()
                 try:
-                    found, live_rep = fmmemory.read_live(self.db.unique_ids())
-                    records = found
-                    if live_rep.game_date:
-                        report.game_date = live_rep.game_date
-                    if live_rep.managed_club:
-                        report.managed_club = live_rep.managed_club
-                except Exception:
+                    game = getattr(editor, "game", None)
+                    if game is not None and hasattr(game, "read_live_snapshot"):
+                        records, club_finances = game.read_live_snapshot(
+                            self.db.unique_ids(),
+                            game_date=report.game_date,
+                            include_clubs=True,
+                        )
+                except Exception as exc:  # noqa: BLE001
                     records = None
+                    club_finances = None
+                    sync_err = str(exc)
 
-            self.db.attach_live(editor, records=records, report=report)
+            synced = self.db.attach_live(
+                editor,
+                records=records,
+                report=report,
+                club_finances=club_finances,
+            )
+            self._staff_live_cache.clear()
+            if refresh_all and records is not None:
+                self._live_sync_ready.set()
+            else:
+                self._live_sync_ready.clear()
+
+            def _warm_live_caches(ed: Any, gdate: str, need_live_sync: bool) -> None:
+                game = getattr(ed, "game", None)
+                if game is None:
+                    self._live_sync_ready.set()
+                    return
+                try:
+                    if hasattr(game, "ensure_people_index"):
+                        game.ensure_people_index()
+                except Exception:  # noqa: BLE001
+                    pass
+                if need_live_sync:
+                    try:
+                        if hasattr(game, "read_live_snapshot") and self.db.editor is ed:
+                            recs, cfins = game.read_live_snapshot(
+                                self.db.unique_ids(),
+                                game_date=gdate,
+                                include_clubs=True,
+                            )
+                            if self.db.editor is ed and recs:
+                                self.db.apply_live(recs, club_finances=cfins)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    finally:
+                        self._live_sync_ready.set()
+                try:
+                    self.faces.warm_entity_uids_from_game(game)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    self.faces.ensure_logo_index()
+                except Exception:  # noqa: BLE001
+                    pass
+
+            threading.Thread(
+                target=_warm_live_caches,
+                args=(editor, report.game_date or "", not (refresh_all and records is not None)),
+                name="fm27-live-warm",
+                daemon=True,
+            ).start()
             mode = "read-only" if self.db.read_only else "read & write"
-            club = report.managed_club or self.status_payload()["managed_club"]
+            st = self.status_payload()
+            club = report.managed_club or st["managed_club"]
+            sync_note = (
+                f" · {synced:,} live players & {len(club_finances or {}):,} club budgets synced"
+                if synced else (f" · sync warning: {sync_err}" if sync_err else " · syncing live data…")
+            )
             return {
                 "ok": True,
                 "message": (
-                    f"Attached to FM27 ({mode}) · Build {getattr(editor, 'build', '')} · "
-                    f"{Snapshot.display_club(club)}"
+                    f"Attached to FM27 ({mode}) · {st['game_date']} · "
+                    f"{Snapshot.display_club(club)}{sync_note}"
                 ),
+                "live_synced": synced,
+                "club_budgets_synced": len(club_finances or {}),
                 "flushed": list(self.db.last_flush),
-                "status": self.status_payload(),
+                "status": st,
             }
 
     def detach_game(self) -> dict[str, Any]:
         with self._attach_lock:
             self.db.detach_live()
+            self._staff_live_cache.clear()
             return {"ok": True, "message": "Detached from FM27.", "status": self.status_payload()}
+
+    def _live_staff_attrs(self, uid: int, *, force_refresh: bool = False) -> dict[str, Any]:
+        """Read (and cache) live FM27 staff attributes when attached."""
+        if not uid or not self.db.attached:
+            return {}
+        if not force_refresh and uid in self._staff_live_cache:
+            return self._staff_live_cache[uid]
+        editor = getattr(self.db, "editor", None)
+        if editor is None or not hasattr(editor, "read_staff"):
+            return {}
+        vals: dict[str, Any] = {}
+        try:
+            rec = editor.read_staff(int(uid))
+            if rec and rec.values:
+                vals = dict(rec.values)
+        except Exception:  # noqa: BLE001
+            vals = {}
+        if len(self._staff_live_cache) > 4096:
+            self._staff_live_cache.clear()
+        self._staff_live_cache[uid] = vals
+        return vals
 
     # -- entities ---------------------------------------------------------
     def get_player(self, uid: int) -> dict[str, Any] | None:
@@ -390,6 +1067,23 @@ class StudioBackend:
         if not row:
             return None
         if self.db.attached:
+            editor = getattr(self.db, "editor", None)
+            if editor is not None and hasattr(editor, "read_live_values"):
+                try:
+                    p_uid = int(row.get("unique_id") or uid)
+                    live_vals = editor.read_live_values(p_uid)
+                    if live_vals:
+                        merged_vals = dict(live_vals)
+                        if merged_vals.get("asking_price_raw") and int(merged_vals["asking_price_raw"]) > 0:
+                            merged_vals["asking_price"] = int(merged_vals["asking_price_raw"])
+                        if "transfer_status" in merged_vals:
+                            ts = int(merged_vals["transfer_status"] or 0)
+                            merged_vals["transfer_listed"] = 1 if ts == 1 else 0
+                            merged_vals["listed_for_loan"] = 1 if ts == 2 else 0
+                        self.db.live.setdefault(p_uid, {}).update(merged_vals)
+                        row.update(merged_vals)
+                except Exception:
+                    pass
             self.db.refresh_display_name(row)
             self.db.refresh_injury(row)
         summary = _player_summary(row)
@@ -575,22 +1269,27 @@ class StudioBackend:
         if club is None:
             return None
         raw_name = str(club.get("name") or "")
-        squad_raw = self.db.squad(raw_name, 120)
-        squad = [_player_summary(p) for p in squad_raw]
+        squad_raw = self.db.players_for_club(raw_name, limit=250)
+        squad = [_player_summary(p, club_context=raw_name) for p in squad_raw]
         staff = [_staff_summary(s) for s in self.db.query_staff(club=raw_name, limit=120)]
         next_fix = self.db.next_fixture(raw_name)
         fixtures = [dict(f) for f in self.db.fixtures(raw_name, 20)]
-        fit_count = sum(1 for p in squad if not p["injured"])
-        morales = [int(p["morale"]) for p in squad if p.get("morale") is not None]
+        active_squad = [p for p in squad if p.get("loan_status") != "out"]
+        fit_count = sum(1 for p in active_squad if not p["injured"])
+        loan_in_count = sum(1 for p in squad if p.get("loan_status") == "in")
+        loan_out_count = sum(1 for p in squad if p.get("loan_status") == "out")
+        morales = [int(p["morale"]) for p in active_squad if p.get("morale") is not None]
         avg_morale = round(sum(morales) / len(morales), 1) if morales else 0
-        total_wage = sum(p["wage_raw"] for p in squad)
+        total_wage = sum(p["wage_raw"] for p in active_squad)
         return {
             **_club_summary(club),
             "squad": squad,
             "staff": staff,
             "staff_counts": self.db.staff_counts(raw_name),
             "fit_count": fit_count,
-            "squad_count": len(squad),
+            "squad_count": len(active_squad),
+            "loan_in_count": loan_in_count,
+            "loan_out_count": loan_out_count,
             "avg_morale": avg_morale,
             "weekly_wage_bill": _money(total_wage),
             "next_fixture": next_fix,
@@ -634,6 +1333,48 @@ class StudioBackend:
         if not row:
             return None
         summary = _staff_summary(row)
+        live_vals: dict[str, Any] = {}
+        live_attrs_available = False
+        editor = getattr(self.db, "editor", None)
+        if self.db.attached and editor is not None and hasattr(editor, "read_staff"):
+            try:
+                rec = editor.read_staff(summary["unique_id"])
+                if rec and rec.values:
+                    live_vals = dict(rec.values)
+                    live_attrs_available = True
+            except Exception:
+                live_vals = {}
+
+        # Merge snapshot + live values + any local overlay edits on this staff row
+        merged = dict(row)
+        merged.update(live_vals)
+        # Re-apply any staged overlay edits for staff attrs stored in self.db.edits
+        row_id = row.get("id")
+        if row_id is not None:
+            prefix = f"staff:{row_id}:"
+            for k, v in (self.db.edits or {}).items():
+                if k.startswith(prefix):
+                    col = k[len(prefix):]
+                    merged[col] = v
+                    if col in _STAFF_ALL_ATTR_COLS:
+                        live_attrs_available = True
+
+        summary["ca"] = int(merged.get("ca") or summary["ca"] or 0)
+        summary["pa"] = int(merged.get("pa") or summary["pa"] or 0)
+        summary["age"] = merged.get("age") if merged.get("age") is not None else summary["age"]
+        summary["job"] = merged.get("job") or summary["job"]
+
+        attrs: dict[str, list[dict[str, Any]]] = {}
+        for group_name, fields in _STAFF_ATTRIBUTE_GROUPS:
+            attrs[group_name] = [
+                {
+                    "label": lbl,
+                    "column": col,
+                    "value": int(merged[col]) if merged.get(col) is not None else None,
+                }
+                for lbl, col in fields
+            ]
+
         club_raw = summary["club_raw"]
         club_obj = self.db.club_by_name(club_raw) if club_raw else None
         colleagues = (
@@ -644,8 +1385,115 @@ class StudioBackend:
         return {
             **summary,
             "dob": Snapshot.dob(row),
+            "home_reputation": int(merged.get("home_reputation") or 0),
+            "current_reputation": int(merged.get("current_reputation") or 0),
+            "world_reputation": int(merged.get("world_reputation") or 0),
+            "live_attrs_available": live_attrs_available,
+            "can_live_write": bool(self.db.attached and not self.db.read_only and live_attrs_available),
+            "attributes": attrs,
+            "star_ratings": staffratings.evaluate_staff(merged, job=summary["job"]),
             "club_id": club_obj["id"] if club_obj else None,
             "colleagues": colleagues[:25],
+        }
+
+    def edit_staff(self, uid: int, column: str, value: Any) -> dict[str, Any]:
+        row = self.db.staff_member(int(uid))
+        if not row:
+            return {"ok": False, "error": f"Staff #{uid} not found."}
+        col = str(column or "").strip()
+        staff_uid = int(row.get("unique_id") or row.get("id") or uid)
+
+        # Text fields (job)
+        if col == "job":
+            val_str = str(value or "").strip()
+            if not val_str:
+                return {"ok": False, "error": "Job title cannot be empty."}
+            self.db.set_value("staff", row, col, val_str)
+            return {
+                "ok": True,
+                "in_game": False,
+                "message": f"Updated job → {val_str} (staged).",
+                "staff": self.get_staff(staff_uid),
+                "status": self.status_payload(),
+            }
+
+        allowed_numeric = (
+            {"ca", "pa", "age", "home_reputation", "current_reputation", "world_reputation"}
+            | _STAFF_ALL_ATTR_COLS
+        )
+        if col not in allowed_numeric:
+            return {"ok": False, "error": f"Staff column {col!r} is not editable."}
+        try:
+            num = int(round(float(value)))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": f"Invalid numeric value: {value!r}"}
+
+        if col in ("ca", "pa"):
+            clamped = max(1, min(200, num))
+        elif col == "age":
+            clamped = max(18, min(95, num))
+        elif col.endswith("_reputation"):
+            clamped = max(0, min(10000, num))
+        else:
+            clamped = max(1, min(20, num))
+
+        in_game = False
+        editor = getattr(self.db, "editor", None)
+        if (col != "age" and self.db.attached and not self.db.read_only
+                and editor is not None and hasattr(editor, "write_staff")):
+            try:
+                clamped = editor.write_staff(staff_uid, col, clamped)
+                in_game = True
+                self._staff_live_cache.pop(staff_uid, None)
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+        else:
+            self.db.set_value("staff", row, col, clamped)
+
+        where = "in FM27" if in_game else "staged"
+        return {
+            "ok": True,
+            "in_game": in_game,
+            "value": clamped,
+            "message": f"Updated {col.replace('_', ' ').title()} → {clamped} ({where}).",
+            "staff": self.get_staff(staff_uid),
+            "status": self.status_payload(),
+        }
+
+    def staff_preset(self, uid: int, preset: str) -> dict[str, Any]:
+        row = self.db.staff_member(int(uid))
+        if not row:
+            return {"ok": False, "error": f"Staff #{uid} not found."}
+        staff_uid = int(row.get("unique_id") or row.get("id") or uid)
+        kind = str(preset or "").strip().lower()
+        if kind != "max_staff":
+            return {"ok": False, "error": f"Unknown staff preset: {preset!r}"}
+
+        editor = getattr(self.db, "editor", None)
+        can_live = bool(self.db.attached and not self.db.read_only
+                        and editor is not None and hasattr(editor, "write_staff"))
+        touched = 0
+        targets: list[tuple[str, int]] = [("ca", 200), ("pa", 200)]
+        for col in sorted(_STAFF_ALL_ATTR_COLS):
+            targets.append((col, 1 if col == "controversy" else 20))
+        if can_live:
+            for col, val in targets:
+                try:
+                    editor.write_staff(staff_uid, col, val)
+                    touched += 1
+                except Exception:
+                    continue
+            msg = f"Maxed {touched} staff attributes to 20 & CA/PA → 200 (in FM27)."
+        else:
+            self.db.set_value("staff", row, "ca", 200)
+            self.db.set_value("staff", row, "pa", 200)
+            msg = "CA/PA → 200 (staged; attach FM27 to max live coaching attributes)."
+        return {
+            "ok": True,
+            "in_game": can_live,
+            "message": msg,
+            "staff": self.get_staff(staff_uid),
+            "status": self.status_payload(),
         }
 
     def get_nation(self, name: str) -> dict[str, Any] | None:
@@ -666,13 +1514,67 @@ class StudioBackend:
     def search(self, *, scope: str = "players", query: str = "", pos: str = "",
                job: str = "", min_age: int | None = None,
                max_age: int | None = None, min_ca: int | None = None,
+               max_ca: int | None = None, min_pa: int | None = None,
+               max_pa: int | None = None,
+               min_pos_rating: float | None = None,
+               attr_filters: list[tuple[str, int | None, int | None]] | None = None,
+               staff_cat: str = "", min_stars: float | None = None,
                listed_only: bool = False, limit: int = 250) -> dict[str, Any]:
         scope_key = (scope or "players").strip().lower()
         cap = max(1, min(400, int(limit)))
         if scope_key == "staff":
-            rows = [_staff_summary(s) for s in self.db.query_staff(
-                query=query, job=(None if not job or job == "Any" else job),
-                min_age=min_age, max_age=max_age, min_ca=min_ca, limit=cap)]
+            cat_key = (staff_cat or "").strip().lower()
+            if cat_key == "any" or cat_key == "best" or cat_key not in staffratings.CATEGORY_BY_KEY:
+                cat_key = ""
+            # Warm the O(1) people UID->ptr index once before reading live staff attrs.
+            if self.db.attached:
+                ed = getattr(self.db, "editor", None)
+                game = getattr(ed, "game", None) if ed is not None else None
+                if game is not None and hasattr(game, "ensure_people_index"):
+                    try:
+                        game.ensure_people_index()
+                    except Exception:  # noqa: BLE001
+                        pass
+            # Scan deeper when filtering/sorting by coaching star rating
+            scan_limit = max(cap, 600 if (cat_key or min_stars is not None) else cap)
+            raw_staff = self.db.query_staff(
+                query=query,
+                job=(None if not job or job == "Any" else job),
+                min_age=min_age,
+                max_age=max_age,
+                min_ca=min_ca,
+                max_ca=max_ca,
+                min_pa=min_pa,
+                max_pa=max_pa,
+                limit=scan_limit,
+            )
+            rows = []
+            for s in raw_staff:
+                summary = _staff_summary(s)
+                uid = summary["unique_id"]
+                merged = dict(s)
+                live_vals = self._live_staff_attrs(uid)
+                if live_vals:
+                    merged.update(live_vals)
+                    summary["ca"] = int(merged.get("ca") or summary["ca"] or 0)
+                    summary["pa"] = int(merged.get("pa") or summary["pa"] or 0)
+                ev = staffratings.evaluate_staff(
+                    merged, job=summary["job"], focus_category=cat_key
+                )
+                if min_stars is not None and ev["stars"] < float(min_stars):
+                    continue
+                summary["stars"] = ev["stars"]
+                summary["star_score"] = ev["score"]
+                summary["live_stars"] = ev["live_stars"]
+                summary["star_category"] = ev["category"]
+                summary["star_category_label"] = ev["category_label"]
+                summary["star_category_zh"] = ev["category_zh"]
+                summary["star_ddm"] = ev["ddm"]
+                summary["star_summary"] = ev["key_summary"]
+                rows.append(summary)
+            if cat_key or min_stars is not None:
+                rows.sort(key=lambda r: (-float(r["stars"]), -float(r["star_score"]), -int(r["ca"])))
+            rows = rows[:cap]
         elif scope_key == "clubs":
             rows = [_club_summary(c) for c in self.db.clubs(query, cap)]
         elif scope_key == "nations":
@@ -680,20 +1582,51 @@ class StudioBackend:
         else:
             scope_key = "players"
             pos_val = None if not pos or pos == "Any" else pos
-            rows = [_player_summary(p) for p in self.db.query_players(
+            need_full_attrs = bool(pos_val or min_pos_rating is not None or attr_filters)
+            scan_limit = max(cap, 2000 if (pos_val or min_pos_rating is not None) else cap)
+            raw_players = self.db.query_players(
                 search=query or None,
                 position=pos_val,
-                position_min=15 if pos_val else None,
+                position_min=(10 if (pos_val and min_pos_rating is not None) else (15 if pos_val else None)),
                 min_age=min_age,
                 max_age=max_age,
                 min_ca=min_ca,
+                max_ca=max_ca,
+                min_pa=min_pa,
+                max_pa=max_pa,
                 transfer_listed=True if listed_only else None,
+                attr_filters=attr_filters or None,
                 order="ca",
                 descending=True,
-                limit=cap,
-                columns=SQUAD_COLUMNS,
-            )]
-        return {"scope": scope_key, "count": len(rows), "rows": rows}
+                limit=scan_limit,
+                columns=("*" if need_full_attrs else SQUAD_COLUMNS),
+            )
+            rows = []
+            for p in raw_players:
+                summary = _player_summary(p)
+                if pos_val:
+                    pr, pr_role, pr_comp = ratings.position_role_rating(p, pos_val)
+                    summary["pos_rating"] = pr
+                    summary["pos_role"] = pr_role
+                    summary["pos_comp"] = pr_comp
+                    summary["pos_label"] = pos_val
+                else:
+                    summary["pos_rating"] = summary["rating"] if summary["rating"] is not None else round(Snapshot.rating(p), 2)
+                    summary["pos_role"] = summary["role"]
+                    summary["pos_comp"] = None
+                    summary["pos_label"] = ""
+                if min_pos_rating is not None and (summary["pos_rating"] or 0.0) < float(min_pos_rating):
+                    continue
+                if attr_filters:
+                    summary["matched_attrs"] = {
+                        col: int(p.get(col) or 0) for col, _lo, _hi in attr_filters
+                        if col in spec.KNOWN_COLUMN_SET
+                    }
+                rows.append(summary)
+            if pos_val or min_pos_rating is not None:
+                rows.sort(key=lambda r: (-float(r["pos_rating"] or 0.0), -int(r["ca"] or 0)))
+            rows = rows[:cap]
+        return {"scope": scope_key, "count": len(rows), "rows": rows, "pos_filter": pos or "Any", "staff_cat": staff_cat or ""}
 
     def transfers(self, *, mode: str = "listed", query: str = "", limit: int = 250) -> dict[str, Any]:
         mode_key = (mode or "listed").strip().lower()
@@ -879,6 +1812,29 @@ class StudioBackend:
         week["local_schedules"] = tacticweb.list_local_fmf("schedules")
         return week
 
+    def export_training_plan(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from . import schedulefiles
+        club = str(payload.get("club") or "").strip() or self.status_payload()["managed_club_raw"]
+        focus = str(payload.get("focus") or "Balanced").strip() or "Balanced"
+        name = str(payload.get("name") or "").strip() or f"{Snapshot.display_club(club)} - {focus}"
+        match_day = str(payload.get("match_day") or "").strip()
+        raw_days = payload.get("days")
+        description = str(payload.get("description") or "").strip()
+        week = fmplans.training_week(focus, name, match_day, days=raw_days)
+        if week.get("error"):
+            return {"ok": False, "error": week["error"]}
+        week_ids = [[int(s["id"]) for s in d["sessions"]] for d in week["days"]]
+        desc_text = description or (" ".join(week.get("notes") or [])[:240] or f"Generated by FM27 Studio ({focus})")
+        try:
+            exported = schedulefiles.export_schedule_fmf(
+                week["name"], week_ids, description=desc_text
+            )
+            exported["local_schedules"] = tacticweb.list_local_fmf("schedules")
+            exported["message"] = f"Exported {exported['filename']} to FM27/schedules"
+            return exported
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+
     def online_tactics(self, *, source: str = "fm-arena", query: str = "",
                        formation: str = "", limit: int = 25) -> dict[str, Any]:
         return tacticweb.search_online_tactics(
@@ -993,7 +1949,30 @@ class StudioBackend:
     def clear_chat(self) -> dict[str, Any]:
         with self._ai_lock:
             self.conversation.clear()
-        return {"ok": True}
+            return self.chat_store.clear_active()
+
+    def list_chat_sessions(self) -> dict[str, Any]:
+        with self._ai_lock:
+            return self.chat_store.list_payload()
+
+    def new_chat_session(self, title: str = "New Chat") -> dict[str, Any]:
+        with self._ai_lock:
+            res = self.chat_store.create_session(title)
+            self._sync_conversation_from_active_session()
+            return res
+
+    def select_chat_session(self, session_id: str) -> dict[str, Any]:
+        with self._ai_lock:
+            res = self.chat_store.select_session(session_id)
+            if res.get("ok"):
+                self._sync_conversation_from_active_session()
+            return res
+
+    def delete_chat_session(self, session_id: str) -> dict[str, Any]:
+        with self._ai_lock:
+            res = self.chat_store.delete_session(session_id)
+            self._sync_conversation_from_active_session()
+            return res
 
     def _expand_slash(self, prompt: str, context: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
         """Handle local instant slash commands or expand AI slash macros.
@@ -1053,6 +2032,14 @@ class StudioBackend:
         if cmd == "/train":
             target = rest or "Balanced match week"
             return f"Create a weekly FM27 training plan for {club} focused on: {target}.", None
+        if cmd == "/lab":
+            target = rest or "my current save tactic vs the best local or FM-Arena tactic"
+            return (
+                f"Use the native FM27 Tactics Lab match engine tools (fm27_lab_*) directly "
+                f"to run a real paired league A/B test for {club}: {target}. "
+                f"Load the save if needed, execute the simulation yourself, and report "
+                f"verified_matches, validation_scope, PPG, W-D-L, GD, xGD, and the winner."
+            ), None
         return text, None
 
     def _prepare_chat_attachments(self, attachments: list[dict[str, Any]] | None
@@ -1134,11 +2121,25 @@ class StudioBackend:
                 emit({"type": "step", **st})
             for tl in instant.get("tools", []):
                 emit({"type": "tool_done", "id": "local_1", **tl})
+            self.chat_store.append_turns(
+                {"role": "user", "text": raw_prompt, "attachments": attachments or []},
+                {
+                    "role": "assistant",
+                    "text": instant["answer"],
+                    "steps": list(instant.get("steps") or []),
+                    "thinking": "",
+                    "tools": [dict(id="local_1", **tl) for tl in (instant.get("tools") or [])],
+                    "elapsedMs": 10,
+                    "error": False,
+                },
+            )
             emit({
                 "type": "done",
                 "text": instant["answer"],
                 "refresh_entity": instant.get("refresh_entity"),
                 "status": self.status_payload(),
+                "sessions": self.chat_store.list_payload()["sessions"],
+                "active_session_id": self.chat_store.active_id,
             })
             return
 
@@ -1159,31 +2160,91 @@ class StudioBackend:
                        for m in self.conversation.messages[-12:] if not m.failed]
             self.conversation.add("user", raw_prompt or "[Attachment]")
 
-        club_name = (context or {}).get("club") or self.status_payload()["managed_club_raw"]
+        # Always anchor the AI's save context on the user's managed club (e.g. Milan),
+        # never hijacked to another club when viewing a loaned-in or scouted player.
+        # If FM27 is attached and background live sync is still finishing, wait briefly
+        # so the AI always reads live injuries, contracts, loans, and budgets.
+        if self.db.attached and self.db.live_count() == 0:
+            self._live_sync_ready.wait(timeout=4.0)
+        club_name = self.status_payload()["managed_club_raw"]
+        active_effort = (settings.reasoning or "Default").strip() or "Default"
         t0 = time.perf_counter()
+        rec_steps: list[dict[str, Any]] = []
+        rec_thinking: list[str] = []
+        rec_tools: list[dict[str, Any]] = []
+        rec_reasoning_tokens = 0
+
+        def _capture_emit(ev: dict[str, Any]) -> None:
+            nonlocal rec_reasoning_tokens
+            etype = ev.get("type")
+            if etype == "step":
+                rec_steps.append({"stage": ev.get("stage"), "label": ev.get("label"), "ms": ev.get("ms", 0)})
+            elif etype == "thinking":
+                if ev.get("text"):
+                    rec_thinking.append(str(ev["text"]))
+                rt = ev.get("reasoning_tokens")
+                if isinstance(rt, int) and rt > 0:
+                    rec_reasoning_tokens += rt
+            elif etype == "tool_done":
+                rec_tools.append({
+                    "id": ev.get("id"), "name": ev.get("name"), "args": ev.get("args") or {},
+                    "ms": ev.get("ms", 0), "ok": ev.get("ok", True), "summary": ev.get("summary") or "",
+                })
+            emit(ev)
+
         try:
             answer = A.chat_with_tools(
                 settings, key, self.db, full_prompt,
                 history=history,
                 club_name=club_name,
-                on_event=emit,
+                on_event=_capture_emit,
                 user_images=user_images or None,
             )
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
             with self._ai_lock:
                 self.conversation.add("assistant", answer)
+                self.chat_store.append_turns(
+                    {"role": "user", "text": raw_prompt or "[Attachment]", "attachments": attachments or []},
+                    {
+                        "role": "assistant",
+                        "text": answer,
+                        "steps": rec_steps,
+                        "thinking": "\n\n".join(rec_thinking),
+                        "reasoningEffort": active_effort,
+                        "reasoningTokens": rec_reasoning_tokens,
+                        "tools": rec_tools,
+                        "elapsedMs": elapsed_ms,
+                        "error": False,
+                    },
+                )
             emit({
                 "type": "done",
                 "text": answer,
-                "elapsed_ms": int((time.perf_counter() - t0) * 1000),
+                "elapsed_ms": elapsed_ms,
+                "reasoning_effort": active_effort,
+                "reasoning_tokens": rec_reasoning_tokens,
                 "status": self.status_payload(),
+                "sessions": self.chat_store.list_payload()["sessions"],
+                "active_session_id": self.chat_store.active_id,
             })
         except A.AssistantError as exc:
+            err_text = str(exc) + (f" ({exc.hint})" if exc.hint else "")
             with self._ai_lock:
                 self.conversation.add("assistant", str(exc), failed=True)
+                self.chat_store.append_turns(
+                    {"role": "user", "text": raw_prompt or "[Attachment]", "attachments": attachments or []},
+                    {"role": "assistant", "text": err_text, "steps": rec_steps,
+                     "thinking": "\n\n".join(rec_thinking), "tools": rec_tools, "error": True},
+                )
             emit({"type": "error", "message": str(exc), "hint": exc.hint or ""})
         except Exception as exc:  # noqa: BLE001
             with self._ai_lock:
                 self.conversation.add("assistant", f"Assistant error: {exc}", failed=True)
+                self.chat_store.append_turns(
+                    {"role": "user", "text": raw_prompt or "[Attachment]", "attachments": attachments or []},
+                    {"role": "assistant", "text": f"Assistant failed: {exc}", "steps": rec_steps,
+                     "thinking": "\n\n".join(rec_thinking), "tools": rec_tools, "error": True},
+                )
             emit({"type": "error", "message": f"Assistant failed: {exc}"})
 
 
@@ -1191,12 +2252,17 @@ class StudioBackend:
 # Threaded local HTTP + SSE Server
 # ---------------------------------------------------------------------------
 
-def _make_handler(backend: StudioBackend, token: str):
+def _make_handler(backend: StudioBackend, token: str,
+                  on_activity: Any = None):
     class StudioHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
             return
+
+        def _touch_activity(self) -> None:
+            if callable(on_activity):
+                on_activity()
 
         def _check_token(self, query_params: dict[str, list[str]]) -> bool:
             hdr = self.headers.get("X-Studio-Token", "")
@@ -1244,6 +2310,7 @@ def _make_handler(backend: StudioBackend, token: str):
             self.wfile.write(data)
 
         def do_GET(self) -> None:  # noqa: N802
+            self._touch_activity()
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path
             qs = urllib.parse.parse_qs(parsed.query)
@@ -1256,11 +2323,33 @@ def _make_handler(backend: StudioBackend, token: str):
                 return
 
             q1 = lambda k, d="": (qs.get(k) or [d])[0]  # noqa: E731
-            if path == "/api/bootstrap":
+            if path == "/api/ping":
+                self._send_json({"ok": True})
+            elif path == "/api/bootstrap":
                 self._send_json(backend.bootstrap())
             elif path == "/api/status":
                 self._send_json(backend.status_payload())
             elif path == "/api/search":
+                def _opt_float(val: str) -> float | None:
+                    s = str(val or "").strip()
+                    if not s:
+                        return None
+                    try:
+                        return float(s)
+                    except ValueError:
+                        return None
+
+                parsed_attrs: list[tuple[str, int | None, int | None]] = []
+                raw_attrs = q1("attrs", "").strip()
+                if raw_attrs:
+                    for part in raw_attrs.split(","):
+                        bits = part.strip().split(":")
+                        if bits and bits[0].strip():
+                            col = bits[0].strip().lower()
+                            lo = _opt_int(bits[1]) if len(bits) > 1 else None
+                            hi = _opt_int(bits[2]) if len(bits) > 2 else None
+                            if lo is not None or hi is not None:
+                                parsed_attrs.append((col, lo, hi))
                 self._send_json(backend.search(
                     scope=q1("scope", "players"),
                     query=q1("q", ""),
@@ -1269,6 +2358,13 @@ def _make_handler(backend: StudioBackend, token: str):
                     min_age=_opt_int(q1("min_age")),
                     max_age=_opt_int(q1("max_age")),
                     min_ca=_opt_int(q1("min_ca")),
+                    max_ca=_opt_int(q1("max_ca")),
+                    min_pa=_opt_int(q1("min_pa")),
+                    max_pa=_opt_int(q1("max_pa")),
+                    min_pos_rating=_opt_float(q1("min_pos_rating")),
+                    attr_filters=parsed_attrs or None,
+                    staff_cat=q1("staff_cat", ""),
+                    min_stars=_opt_float(q1("min_stars")),
                     listed_only=q1("listed") in ("1", "true", "yes"),
                     limit=_opt_int(q1("limit")) or 250,
                 ))
@@ -1304,6 +2400,11 @@ def _make_handler(backend: StudioBackend, token: str):
                     self._send_json({"ok": False, "error": str(exc), "jobs": []})
             elif path == "/api/ai/settings":
                 self._send_json(backend.ai_settings_payload())
+            elif path == "/api/ai/sessions":
+                self._send_json(backend.list_chat_sessions())
+            elif path.startswith("/api/ai/sessions/"):
+                sid = urllib.parse.unquote(path[len("/api/ai/sessions/"):])
+                self._send_json(backend.select_chat_session(sid))
             elif path.startswith("/api/player/"):
                 parts = path.split("/")
                 uid = _opt_int(parts[3]) if len(parts) >= 4 else None
@@ -1339,12 +2440,39 @@ def _make_handler(backend: StudioBackend, token: str):
                 self._send_json(data)
             elif path.startswith("/api/avatar/"):
                 parts = path.split("/")
-                uid = _opt_int(parts[4]) if len(parts) >= 5 else None
-                file_path = backend.faces.resolve(uid) if uid else None
+                kind = parts[3].strip().lower() if len(parts) >= 4 else ""
+                raw_key = urllib.parse.unquote("/".join(parts[4:])).strip() if len(parts) >= 5 else ""
+                file_path: str | None = None
+                if kind in ("player", "staff"):
+                    uid = _opt_int(raw_key)
+                    file_path = backend.faces.resolve(uid) if uid else None
+                elif kind == "club" and raw_key:
+                    if raw_key.isdigit():
+                        club_row = backend.db.club(int(raw_key))
+                        if club_row:
+                            file_path = backend.faces.resolve_club(
+                                str(club_row.get("name") or ""),
+                                uid=_opt_int(club_row.get("unique_id")),
+                            )
+                        else:
+                            file_path = backend.faces.resolve_club("", uid=int(raw_key))
+                    else:
+                        club_row = backend.db.club_by_name(raw_key)
+                        c_name = str(club_row.get("name") or raw_key) if club_row else raw_key
+                        c_uid = _opt_int(club_row.get("unique_id")) if club_row else None
+                        file_path = backend.faces.resolve_club(c_name, uid=c_uid)
+                        if not file_path and c_name != raw_key:
+                            file_path = backend.faces.resolve_club(raw_key)
+                elif kind == "nation" and raw_key:
+                    n_uid = _opt_int(raw_key) if raw_key.isdigit() else None
+                    file_path = backend.faces.resolve_nation(
+                        "" if n_uid is not None else raw_key,
+                        uid=n_uid,
+                    )
                 if not file_path:
                     self.send_response(HTTPStatus.NOT_FOUND)
                     self.send_header("Content-Length", "0")
-                    self.send_header("Cache-Control", "public, max-age=300")
+                    self.send_header("Cache-Control", "no-store")
                     self.end_headers()
                     return
                 mime, _ = mimetypes.guess_type(file_path)
@@ -1373,6 +2501,7 @@ def _make_handler(backend: StudioBackend, token: str):
                 self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
 
         def do_POST(self) -> None:  # noqa: N802
+            self._touch_activity()
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path
             qs = urllib.parse.parse_qs(parsed.query)
@@ -1404,8 +2533,18 @@ def _make_handler(backend: StudioBackend, token: str):
                 ))
             elif path == "/api/ai/clear":
                 self._send_json(backend.clear_chat())
+            elif path == "/api/ai/sessions":
+                act = str(body.get("action") or "new").strip().lower()
+                if act == "select":
+                    self._send_json(backend.select_chat_session(str(body.get("id") or "")))
+                elif act == "delete":
+                    self._send_json(backend.delete_chat_session(str(body.get("id") or "")))
+                else:
+                    self._send_json(backend.new_chat_session(str(body.get("title") or "New Chat")))
             elif path == "/api/tactics/download":
                 self._send_json(backend.download_tactic(str(body.get("url") or "")))
+            elif path == "/api/plans/training/export":
+                self._send_json(backend.export_training_plan(body))
             elif path == "/api/lab/install":
                 res = tacticslab.download_lab_from_github(str(body.get("dest_dir") or "") or None)
                 backend.lab.refresh_install()
@@ -1465,6 +2604,19 @@ def _make_handler(backend: StudioBackend, token: str):
                     self._send_json(backend.player_preset(uid, body.get("preset", "")))
                 else:
                     self._send_json({"error": "Unknown player action"}, HTTPStatus.NOT_FOUND)
+            elif path.startswith("/api/staff/"):
+                parts = path.split("/")
+                uid = _opt_int(parts[3]) if len(parts) >= 4 else None
+                action = parts[4] if len(parts) >= 5 else ""
+                if uid is None:
+                    self._send_json({"error": "Invalid staff id"}, HTTPStatus.BAD_REQUEST)
+                    return
+                if action == "edit":
+                    self._send_json(backend.edit_staff(uid, body.get("column", ""), body.get("value")))
+                elif action == "preset":
+                    self._send_json(backend.staff_preset(uid, body.get("preset", "")))
+                else:
+                    self._send_json({"error": "Unknown staff action"}, HTTPStatus.NOT_FOUND)
             elif path.startswith("/api/club/"):
                 parts = path.split("/")
                 key = urllib.parse.unquote(parts[3]) if len(parts) >= 4 else ""
@@ -1480,8 +2632,14 @@ def _make_handler(backend: StudioBackend, token: str):
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
             self.send_header("Connection", "close")
             self.end_headers()
+            try:
+                self.wfile.write(b": connected\n\n")
+                self.wfile.flush()
+            except OSError:
+                return
 
             events: queue.Queue[dict[str, Any] | None] = queue.Queue()
 
@@ -1498,9 +2656,19 @@ def _make_handler(backend: StudioBackend, token: str):
 
             threading.Thread(target=runner, daemon=True).start()
             while True:
-                item = events.get()
+                try:
+                    item = events.get(timeout=15.0)
+                except queue.Empty:
+                    self._touch_activity()
+                    try:
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
+                    except OSError:
+                        break
+                    continue
                 if item is None:
                     break
+                self._touch_activity()
                 payload = f"data: {json.dumps(item, ensure_ascii=False, default=str)}\n\n".encode("utf-8")
                 try:
                     self.wfile.write(payload)
@@ -1520,12 +2688,26 @@ class StudioServer:
         self.backend = backend if backend is not None else StudioBackend()
         self._owns_backend = backend is None
         self.token = secrets.token_urlsafe(24)
-        self.httpd = ThreadingHTTPServer((host, port), _make_handler(self.backend, self.token))
+        self.had_client = False
+        self.last_activity_at = 0.0
+
+        def _mark_active() -> None:
+            self.had_client = True
+            self.last_activity_at = time.monotonic()
+
+        self.httpd = ThreadingHTTPServer(
+            (host, port),
+            _make_handler(self.backend, self.token, on_activity=_mark_active),
+        )
+        self.httpd.daemon_threads = True
         self.host, self.port = self.httpd.server_address
         self._thread: threading.Thread | None = None
         self._prune_stop = threading.Event()
         self._prune_interval = max(60.0, float(prune_interval_seconds))
         self._prune_thread: threading.Thread | None = None
+
+    def is_client_active(self, within_seconds: float = 35.0) -> bool:
+        return self.had_client and (time.monotonic() - self.last_activity_at) <= within_seconds
 
     @property
     def url(self) -> str:

@@ -328,13 +328,13 @@ class TacticsLabError(RuntimeError):
 class TacticsLabClient:
     """Thread-safe persistent stdio client for ``desktop_server.py --stdio``."""
 
-    def __init__(self, custom_dir: str = ""):
+    def __init__(self, custom_dir: str = "", data_subdir: str = "tactics-lab-data"):
         self._lock = threading.RLock()
         self._custom_dir = custom_dir
         self._install: dict[str, Any] = detect_lab_installation(custom_dir)
         self._proc: subprocess.Popen | None = None
         self._req_id = 0
-        self._studio_data_dir = os.path.join(A.data_directory(), "tactics-lab-data")
+        self._studio_data_dir = os.path.join(A.data_directory(), data_subdir or "tactics-lab-data")
         # Session state for loaded save / tactics board
         self.loaded_save_id: str = ""
         self.loaded_save_path: str = ""
@@ -342,6 +342,8 @@ class TacticsLabClient:
         self.loaded_club_name: str = ""
         self.base_scenario: dict[str, Any] | None = None
         self.opponents_cache: list[dict[str, Any]] = []
+        self.club_players: list[dict[str, Any]] = []
+        self._catalog_cache: dict[str, Any] | None = None
 
     def refresh_install(self, custom_dir: str | None = None) -> dict[str, Any]:
         with self._lock:
@@ -538,14 +540,51 @@ class TacticsLabClient:
             raise TacticsLabError(f"Tactic file not found: {path}")
         return self.inspect_fmf_bytes(Path(path).read_bytes(), base_scenario=base_scenario)
 
+    def get_catalog(self) -> dict[str, Any]:
+        if self._catalog_cache is None:
+            self._catalog_cache = self.call("GET", "/api/catalog")
+        return self._catalog_cache
+
+    @staticmethod
+    def _build_filtered_selection(players: list[dict[str, Any]],
+                                  exclude_uids: set[int]) -> tuple[list[int], list[int]]:
+        """Pick an 11-player lineup + bench from ``club_info['players']`` excluding ``exclude_uids``."""
+        avail = [p for p in players if int(p.get("uid") or 0) not in exclude_uids]
+        if len(avail) < 11:
+            return [], []
+        gks = sorted(
+            [p for p in avail if int((p.get("positions") or {}).get("gk") or 0) >= 15],
+            key=lambda p: -int(p.get("ca") or 0),
+        )
+        lineup: list[int] = []
+        used: set[int] = set()
+        if gks:
+            uid = int(gks[0]["uid"])
+            lineup.append(uid)
+            used.add(uid)
+        outfield = sorted(
+            [p for p in avail if int(p.get("uid") or 0) not in used],
+            key=lambda p: -int(p.get("ca") or 0),
+        )
+        for p in outfield:
+            if len(lineup) >= 11:
+                break
+            uid = int(p["uid"])
+            lineup.append(uid)
+            used.add(uid)
+        bench = [int(p["uid"]) for p in avail if int(p.get("uid") or 0) not in used][:12]
+        return lineup, bench
+
     def import_and_load_save(self, save_path: str, club_name_hint: str = "",
                              club_uid: int | None = None, tactic_index: int = 0,
-                             timeout_seconds: float = 180.0) -> dict[str, Any]:
+                             exclude_player_uids: list[int] | None = None,
+                             timeout_seconds: float = 180.0,
+                             on_progress: Any = None) -> dict[str, Any]:
         """Import a ``.fm`` save, load the club onto the tactics board, and gather league opponents."""
         if not os.path.isfile(save_path):
             raise TacticsLabError(f"Save file not found: {save_path}")
 
-        # 1) Start async save import and poll /api/save/status
+        # 1) Start async save import and poll /api/save/status until complete
         started = self.call("POST", "/api/save/import", {"path": os.path.abspath(save_path)})
         save_id = str(started.get("id") or "")
         deadline = time.monotonic() + timeout_seconds
@@ -553,68 +592,110 @@ class TacticsLabClient:
         while time.monotonic() < deadline:
             st = self.call("GET", "/api/save/status")
             save_status = st
-            active = st.get("active")
-            saves = st.get("saves") or []
-            if not save_id and saves:
-                matched = next((s for s in saves if os.path.abspath(str(s.get("path") or "")) == os.path.abspath(save_path)), None)
-                if matched:
-                    save_id = str(matched.get("id") or "")
-            if not active:
+            if st.get("id"):
+                save_id = str(st["id"])
+            status_str = str(st.get("status") or "").lower()
+            is_busy = bool(st.get("active")) or status_str in ("running", "queued", "loading", "reading")
+            if callable(on_progress) and st.get("stage"):
+                on_progress(f"Save import: {st['stage']}")
+            if not is_busy:
                 if st.get("error"):
                     raise TacticsLabError(str(st["error"]))
                 break
             time.sleep(0.5)
 
-        saves = save_status.get("saves") or []
-        if not save_id and saves:
-            save_id = str(saves[0].get("id") or "")
+        if not save_id:
+            saves = save_status.get("saves") or []
+            if saves:
+                save_id = str(saves[0].get("id") or "")
         if not save_id:
             raise TacticsLabError("Save import completed but no save ID was returned.")
 
-        # 2) Pick managed club (or match club_name_hint / club_uid)
-        clubs_resp = self.call("POST", "/api/save/board-clubs", {"id": save_id, "managed": True})
-        clubs = clubs_resp.get("clubs") or []
-        if not clubs:
-            clubs_resp = self.call("POST", "/api/save/board-clubs", {"id": save_id, "managed": False})
-            clubs = clubs_resp.get("clubs") or []
+        # 2) Resolve target club: prefer managed clubs from /api/save/status directly
+        # NOTE: /api/save/board-clubs expects `managed` to be a managed club_uid (int) or omitted,
+        # NEVER boolean True (which Python treats as club_uid=1 -> "请选择当前存档的执教球队").
+        managed_clubs = list(save_status.get("managed") or [])
+        all_clubs = list(save_status.get("clubs") or [])
+        if not managed_clubs and not all_clubs:
+            clubs_resp = self.call("POST", "/api/save/board-clubs", {"id": save_id})
+            all_clubs = list(clubs_resp.get("clubs") or [])
+
+        def _cid(c: dict[str, Any]) -> int:
+            return int(c.get("club_uid") or c.get("uid") or 0)
+
+        def _cname(c: dict[str, Any]) -> str:
+            return str(c.get("club_name") or c.get("name") or c.get("club_short_name") or "").strip()
+
+        def _match_hint(pool: list[dict[str, Any]], hint_str: str) -> dict[str, Any] | None:
+            h = hint_str.strip().lower()
+            if not h:
+                return None
+            # Exact / substring match across full name and short name
+            for c in pool:
+                names = [
+                    str(c.get("club_name") or "").lower(),
+                    str(c.get("club_short_name") or "").lower(),
+                    str(c.get("name") or "").lower(),
+                ]
+                if any(h == n or (h and h in n) or (n and n in h) for n in names if n):
+                    return c
+            return None
+
         chosen = None
         if club_uid:
-            chosen = next((c for c in clubs if int(c.get("club_uid") or c.get("uid") or 0) == int(club_uid)), None)
+            chosen = next((c for c in (managed_clubs + all_clubs) if _cid(c) == int(club_uid)), None)
         if chosen is None and club_name_hint:
-            hint = club_name_hint.strip().lower()
-            chosen = next((c for c in clubs if hint in str(c.get("name") or "").lower()), None)
-        if chosen is None and clubs:
-            chosen = clubs[0]
+            chosen = _match_hint(managed_clubs, club_name_hint) or _match_hint(all_clubs, club_name_hint)
+        if chosen is None and managed_clubs:
+            chosen = managed_clubs[0]
+        if chosen is None and all_clubs:
+            chosen = all_clubs[0]
         if chosen is None:
             raise TacticsLabError("No clubs found inside the imported save.")
 
-        cid = int(chosen.get("club_uid") or chosen.get("uid") or 0)
-        cname = str(chosen.get("name") or f"Club #{cid}")
+        cid = _cid(chosen)
+        cname = _cname(chosen) or f"Club #{cid}"
 
-        # 3) Load club tactics + load tactic_index onto tactics board
+        # 3) Load club tactics + real save roster + load tactic_index onto tactics board
         club_info = self.call("POST", "/api/save/club", {"id": save_id, "club_uid": cid})
-        tactics_list = club_info.get("tactics") or []
-        t_idx = min(max(0, int(tactic_index)), max(0, len(tactics_list) - 1))
+        tactics_list = [t for t in (club_info.get("tactics") or []) if isinstance(t.get("index"), int)]
+        club_players = list(club_info.get("players") or [])
+        t_idx = min(max(0, int(tactic_index)), max(0, len(tactics_list) - 1)) if tactics_list else 0
         defaults = self.get_defaults()
-        loaded = self.call("POST", "/api/save/load", {
+
+        load_body: dict[str, Any] = {
             "id": save_id,
             "club_uid": cid,
             "tactic_index": t_idx,
             "scenario": defaults,
-        })
+        }
+        excl_set = {int(u) for u in (exclude_player_uids or []) if u}
+        if excl_set and club_players:
+            lineup_uids, bench_uids = self._build_filtered_selection(club_players, excl_set)
+            if len(lineup_uids) == 11:
+                load_body["lineup"] = lineup_uids
+                load_body["bench"] = bench_uids
+
+        loaded = self.call("POST", "/api/save/load", load_body)
         scenario = loaded.get("scenario")
         if not scenario:
             raise TacticsLabError("Failed to load club onto tactics board.")
 
-        # 4) Inspect league opponents (async if needed)
-        opp_res = self.call("POST", "/api/save/opponents", {"id": save_id, "club_uid": cid})
-        opp_deadline = time.monotonic() + 90.0
+        # 4) Inspect league opponents: poll POST /api/save/opponents until status != "reading"
+        opp_deadline = time.monotonic() + 180.0
+        opp_res: dict[str, Any] = {}
+        last_stage = ""
         while time.monotonic() < opp_deadline:
-            st = self.call("GET", "/api/save/status")
-            if not st.get("active"):
+            opp_res = self.call("POST", "/api/save/opponents", {"id": save_id, "club_uid": cid})
+            status_val = str(opp_res.get("status") or "").lower()
+            stage_val = str(opp_res.get("stage") or "")
+            if callable(on_progress) and stage_val and stage_val != last_stage:
+                last_stage = stage_val
+                on_progress(f"Opponents: {stage_val}")
+            if status_val != "reading":
                 break
-            time.sleep(0.5)
-        opp_res = self.call("POST", "/api/save/opponents", {"id": save_id, "club_uid": cid})
+            time.sleep(0.75)
+
         opponents = [o for o in (opp_res.get("opponents") or []) if o.get("available", True)]
 
         self.loaded_save_id = save_id
@@ -623,18 +704,29 @@ class TacticsLabClient:
         self.loaded_club_name = cname
         self.base_scenario = scenario
         self.opponents_cache = opponents
+        self.club_players = club_players
 
         return {
             "ok": True,
             "save_id": save_id,
             "save_path": self.loaded_save_path,
+            "save_date": save_status.get("date") or club_info.get("source_date") or "",
             "club_uid": cid,
             "club_name": cname,
+            "managed_clubs": [
+                {"club_uid": _cid(c), "name": _cname(c), "manager": c.get("manager_name") or ""}
+                for c in managed_clubs
+            ],
             "tactics": [
-                {"index": idx, "name": t.get("name") or f"Tactic {idx + 1}",
-                 "formation": t.get("formation") or ""}
+                {"index": t.get("index"), "name": t.get("name") or f"Tactic {idx + 1}"}
                 for idx, t in enumerate(tactics_list)
             ],
+            "active_squad_count": len(club_players),
+            "active_squad": [
+                {"uid": p.get("uid"), "name": p.get("name"), "ca": p.get("ca")}
+                for p in club_players[:30]
+            ],
+            "excluded_uids": sorted(excl_set),
             "opponents_count": len(opponents),
             "opponents": [
                 {"key": o.get("key"), "club_uid": o.get("club_uid"),
@@ -688,6 +780,8 @@ class TacticsLabClient:
                       mode: str = "league",
                       opponent_count: int = 4,
                       matches_per_opponent: int = 2,
+                      workers: int | str = "auto",
+                      exclude_player_uids: list[int] | None = None,
                       event_details: bool = False,
                       name: str = "") -> dict[str, Any]:
         """Start a native FM27 match-engine test (single or A/B comparison)."""
@@ -699,12 +793,35 @@ class TacticsLabClient:
         use_league = (mode == "league" and bool(self.loaded_save_id) and bool(self.base_scenario) and bool(self.opponents_cache))
         base = self.base_scenario if (use_league and self.base_scenario) else self.get_defaults()
 
+        # Apply squad exclusions (injured / on-holiday / unavailable players) onto the base scenario
+        excl_set = {int(u) for u in (exclude_player_uids or []) if u}
+        if use_league and excl_set and self.club_players:
+            lineup_uids, bench_uids = self._build_filtered_selection(self.club_players, excl_set)
+            if len(lineup_uids) == 11:
+                try:
+                    sel_res = self.call("POST", "/api/save/selection", {
+                        "scenario": base,
+                        "lineup": lineup_uids,
+                        "bench": bench_uids,
+                    })
+                    if isinstance(sel_res.get("scenario"), dict):
+                        base = sel_res["scenario"]
+                except TacticsLabError:
+                    pass
+
         sc_b, name_b = self._resolve_tactic_scenario(tactic_b, base)
         sc_a, name_a = (self._resolve_tactic_scenario(tactic_a, base) if tactic_a else (None, ""))
 
         count = max(2, int(matches_per_opponent or 2))
         if count % 2:
             count += 1
+
+        rec_workers = int((st.get("batch") or {}).get("recommended") or 4)
+        worker_val = max(1, min(16, rec_workers))
+        if isinstance(workers, int) and workers >= 1:
+            worker_val = min(16, workers)
+        elif isinstance(workers, str) and workers.strip().isdigit():
+            worker_val = max(1, min(16, int(workers.strip())))
 
         if use_league:
             # Pick distinct clubs from league opponents
@@ -731,7 +848,7 @@ class TacticsLabClient:
                 "seed_mode": "fixed",
                 "first_seed": 1,
                 "event_details": bool(event_details),
-                "workers": 1,
+                "workers": worker_val,
                 "name": name or (f"AB: {name_a} vs {name_b}" if sc_a else f"League: {name_b}"),
             }
             if sc_a is not None:
@@ -742,20 +859,22 @@ class TacticsLabClient:
                 "mode": "league",
                 "job_id": job.get("id"),
                 "total": job.get("total"),
+                "workers": job.get("workers"),
                 "tactic_a": name_a,
                 "tactic_b": name_b,
                 "opponents_count": len(picked),
+                "matches_per_opponent": count,
                 "job": job,
             }
 
         # Fallback / Quick neutral fixture A/B test (no .fm save required)
         payload = {
             "scenario": sc_b,
-            "count": max(2, min(40, count)),
+            "count": max(2, min(400, count)),
             "seed_mode": "fixed",
             "first_seed": 1,
             "event_details": bool(event_details),
-            "workers": 1,
+            "workers": worker_val,
             "name": name or (f"AB: {name_a} vs {name_b}" if sc_a else f"Test: {name_b}"),
         }
         if sc_a is not None:
@@ -766,9 +885,208 @@ class TacticsLabClient:
             "mode": "quick",
             "job_id": job.get("id"),
             "total": job.get("total"),
+            "workers": job.get("workers"),
             "tactic_a": name_a,
             "tactic_b": name_b,
             "job": job,
+        }
+
+    def create_custom_tactic(self, *, name: str,
+                             formation: str = "4-2-3-1",
+                             mentality: str | int = "Balanced",
+                             roles: dict[str, str] | None = None,
+                             instructions: dict[str, str] | None = None,
+                             save_to_tactics_folder: bool = True) -> dict[str, Any]:
+        """Build a native engine-validated FM27 tactic and export it as a real ``.fmf`` file."""
+        import copy
+
+        cat = self.get_catalog()
+        elig: dict[str, list[list[str]]] = cat.get("role_eligibility") or {}
+        valid_pos = {p["id"] for p in (cat.get("positions") or []) if p.get("id")}
+
+        formations_map: dict[str, list[str]] = {
+            "4-2-3-1": ["GK", "DL", "DCL", "DCR", "DR", "DML", "DMR", "AML", "AMC", "AMR", "ST"],
+            "4-3-3": ["GK", "DL", "DCL", "DCR", "DR", "DMC", "MCL", "MCR", "AML", "AMR", "ST"],
+            "4-4-2": ["GK", "DL", "DCL", "DCR", "DR", "ML", "MCL", "MCR", "MR", "STL", "STR"],
+            "3-4-2-1": ["GK", "DCL", "DC", "DCR", "WBL", "DML", "DMR", "WBR", "AMCL", "AMCR", "ST"],
+            "3-5-2": ["GK", "DCL", "DC", "DCR", "WBL", "DMC", "MCL", "MCR", "WBR", "STL", "STR"],
+            "4-2-4": ["GK", "DL", "DCL", "DCR", "DR", "DML", "DMR", "AML", "AMR", "STL", "STR"],
+            "5-2-3": ["GK", "WBL", "DCL", "DC", "DCR", "WBR", "DML", "DMR", "AML", "AMR", "ST"],
+            "4-1-2-1-2": ["GK", "DL", "DCL", "DCR", "DR", "DMC", "MCL", "MCR", "AMC", "STL", "STR"],
+        }
+        key_f = (formation or "4-2-3-1").strip()
+        slots = formations_map.get(key_f)
+        if not slots:
+            # Support partial match like "4-2-3-1 DM AM Wide"
+            for fk, fv in formations_map.items():
+                if fk in key_f:
+                    slots = fv
+                    key_f = fk
+                    break
+        if not slots:
+            # Support comma-separated explicit catalog positions
+            raw_parts = [p.strip().upper() for p in key_f.replace(" ", ",").split(",") if p.strip()]
+            if len(raw_parts) == 11 and all(p in valid_pos for p in raw_parts):
+                slots = raw_parts
+            else:
+                slots = formations_map["4-2-3-1"]
+                key_f = "4-2-3-1"
+
+        mentality_aliases = {
+            "very defensive": 1, "defensive": 2, "cautious": 3,
+            "balanced": 4, "positive": 5, "attacking": 6, "very attacking": 7,
+            "极度防守": 1, "防守": 2, "谨慎": 3, "均衡": 4, "积极": 5, "进攻": 6, "全力进攻": 7,
+        }
+        if isinstance(mentality, int):
+            ment_id = max(1, min(7, mentality))
+        else:
+            m_str = str(mentality or "Balanced").strip().lower()
+            ment_id = int(m_str) if m_str.isdigit() else mentality_aliases.get(m_str, 4)
+            ment_id = max(1, min(7, ment_id))
+
+        base = copy.deepcopy(self.base_scenario if self.base_scenario else self.get_defaults())
+        team0 = (base.get("teams") or [{}])[0]
+        team0["tactic_name"] = (name or f"Custom {key_f}").strip()
+        team0["mentality"] = ment_id
+
+        # Map team instructions dynamically from catalog (keeping PressingTrap=Standard by default per S5)
+        ti_map: dict[str, int] = dict(team0.get("instructions") or {})
+        cat_tis = cat.get("team_instructions") or []
+        # Default PressingTrap (id 25) to Standard (option with '标准' / 'Standard')
+        for ti in cat_tis:
+            if ti.get("name") == "PressingTrap":
+                std = next((o["id"] for o in (ti.get("options") or []) if "标准" in str(o.get("label") or "")), None)
+                if std is not None:
+                    ti_map[str(ti["id"])] = std
+        if isinstance(instructions, dict):
+            for k, v in instructions.items():
+                kn = str(k or "").strip().lower().replace("_", "").replace(" ", "")
+                vn = str(v or "").strip().lower()
+                if not kn or not vn:
+                    continue
+                matched_ti = next(
+                    (ti for ti in cat_tis if str(ti.get("name") or "").lower() == kn
+                     or str(ti.get("id")) == kn),
+                    None,
+                )
+                if not matched_ti:
+                    continue
+                opts = matched_ti.get("options") or []
+                matched_opt = None
+                for opt in opts:
+                    gif = str(opt.get("source_gif") or "").lower()
+                    lbl = str(opt.get("label") or "").lower()
+                    if vn == lbl or vn == gif or (vn and (vn in gif or vn in lbl)):
+                        matched_opt = opt["id"]
+                        break
+                if matched_opt is not None:
+                    ti_map[str(matched_ti["id"])] = matched_opt
+        team0["instructions"] = ti_map
+
+        # Canonical base roles that are universally valid across every formation context
+        base_in_role: dict[str, str] = {
+            "GK": "Goalkeeper",
+            "DR": "FullBack", "DL": "FullBack",
+            "DC": "CentreBack", "DCR": "CentreBack", "DCL": "CentreBack",
+            "WBR": "WingBack", "WBL": "WingBack",
+            "DMC": "DefensiveMidfielder", "DMR": "DefensiveMidfielder", "DML": "DefensiveMidfielder",
+            "MR": "WideMidfielder", "ML": "WideMidfielder",
+            "MC": "CentralMidfielder", "MCR": "CentralMidfielder", "MCL": "CentralMidfielder",
+            "AMR": "Winger", "AML": "Winger",
+            "AMC": "AttackingMidfielder", "AMCR": "AttackingMidfielder", "AMCL": "AttackingMidfielder",
+            "ST": "CentreForward", "STR": "CentreForward", "STL": "CentreForward",
+        }
+        base_out_role: dict[str, str] = {
+            "GK": "OPGoalkeeper",
+            "DR": "OPFullBack", "DL": "OPFullBack",
+            "DC": "OPCentreBack", "DCR": "OPCentreBack", "DCL": "OPCentreBack",
+            "WBR": "OPWingBack", "WBL": "OPWingBack",
+            "DMC": "OPDefensiveMidfielder", "DMR": "OPDefensiveMidfielder", "DML": "OPDefensiveMidfielder",
+            "MR": "OPWideMidfielder", "ML": "OPWideMidfielder",
+            "MC": "OPCentralMidfielder", "MCR": "OPCentralMidfielder", "MCL": "OPCentralMidfielder",
+            "AMR": "OPWinger", "AML": "OPWinger",
+            "AMC": "OPAttackingMidfielder", "AMCR": "OPAttackingMidfielder", "AMCL": "OPAttackingMidfielder",
+            "ST": "OPCentreForward", "STR": "OPCentreForward", "STL": "OPCentreForward",
+        }
+
+        # Build validated in-possession (phase 0) and out-of-possession (phase 1) slots
+        role_overrides = {str(k).strip().upper(): str(v).strip() for k, v in (roles or {}).items()}
+        empty_pi = {str(i): 0 for i in range(17)}
+
+        def _build_phases(use_overrides: bool) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]]:
+            p0: list[dict[str, Any]] = []
+            p1: list[dict[str, Any]] = []
+            summ: list[dict[str, str]] = []
+            for pos_id in slots:
+                pos_elig = elig.get(pos_id) or [[], []]
+                in_opts = pos_elig[0] if len(pos_elig) > 0 else []
+                out_opts = pos_elig[1] if len(pos_elig) > 1 else []
+                def_in = base_in_role.get(pos_id)
+                in_role = def_in if (def_in and def_in in in_opts) else (in_opts[0] if in_opts else "CentralMidfielder")
+                def_out = base_out_role.get(pos_id)
+                out_role = def_out if (def_out and def_out in out_opts) else (out_opts[0] if out_opts else f"OP{in_role}")
+                if use_overrides:
+                    req = role_overrides.get(pos_id, "")
+                    if req:
+                        rn = req.lower().replace(" ", "").replace("-", "").replace("_", "")
+                        hit_in = next((r for r in in_opts if r.lower() == rn or rn in r.lower()), None)
+                        if hit_in:
+                            in_role = hit_in
+                        hit_out = next((r for r in out_opts if r.lower() == rn or rn in r.lower()), None)
+                        if hit_out:
+                            out_role = hit_out
+                p0.append({
+                    "position": pos_id, "role": in_role, "duty": "2097152",
+                    "instructions": dict(empty_pi), "target_player": 255, "target_position": 0,
+                })
+                p1.append({
+                    "position": pos_id, "role": out_role, "duty": "2097152",
+                    "instructions": dict(empty_pi), "target_player": 255, "target_position": 0,
+                })
+                summ.append({"position": pos_id, "in_role": in_role, "out_role": out_role})
+            return p0, p1, summ
+
+        phase0, phase1, summary_slots = _build_phases(use_overrides=True)
+        team0["phases"] = [phase0, phase1]
+
+        # Validate through Tactics Lab's native validator (fallback to base roles if a context-specific role was rejected)
+        try:
+            val_res = self.call("POST", "/api/validate", base)
+        except TacticsLabError:
+            phase0, phase1, summary_slots = _build_phases(use_overrides=False)
+            team0["phases"] = [phase0, phase1]
+            val_res = self.call("POST", "/api/validate", base)
+        validated_sc = val_res.get("scenario") or base
+        # Export real .fmf via Tactics Lab's native exporter
+        exp_res = self.call("POST", "/api/export-fmf", {"side": 0, "scenario": validated_sc})
+        b64 = str(exp_res.get("file_base64") or "")
+        if not b64:
+            raise TacticsLabError("Native /api/export-fmf did not return file_base64.")
+        raw_fmf = base64.b64decode(b64)
+
+        saved_path = ""
+        filename = tacticweb._safe_fmf_filename(f"{team0['tactic_name']}.fmf")
+        if save_to_tactics_folder:
+            tdir = tacticweb.detect_fm27_tactics_dir()
+            os.makedirs(tdir, exist_ok=True)
+            saved_path = os.path.join(tdir, filename)
+            with open(saved_path, "wb") as handle:
+                handle.write(raw_fmf)
+
+        return {
+            "ok": True,
+            "tactic_name": team0["tactic_name"],
+            "formation": key_f,
+            "mentality_id": ment_id,
+            "filename": filename,
+            "path": saved_path,
+            "bytes": len(raw_fmf),
+            "slots": summary_slots,
+            "export_report": exp_res.get("report") or {},
+            "usage_hint": (
+                f"Saved real FM27 tactic '{filename}'. Pass tactic_a_kind='local_fmf' "
+                f"and tactic_a_ref='{filename}' to fm27_lab_run_ab_test to simulate it."
+            ),
         }
 
     def list_jobs(self) -> list[dict[str, Any]]:
@@ -785,6 +1103,182 @@ class TacticsLabClient:
 
     def cancel_job(self) -> dict[str, Any]:
         return self.call("POST", "/api/cancel", {})
+
+    def ensure_save_loaded(self, club_name_hint: str = "", save_path: str = "",
+                           tactic_index: int = 0,
+                           exclude_player_uids: list[int] | None = None,
+                           on_progress: Any = None) -> dict[str, Any] | None:
+        """Load the newest local ``.fm`` save if no league save is loaded yet."""
+        if self.loaded_save_id and self.base_scenario and self.opponents_cache:
+            return None
+        sp = (save_path or "").strip()
+        if not sp:
+            saves = list_local_saves().get("saves") or []
+            if not saves:
+                return None
+            sp = saves[0]["path"]
+        if callable(on_progress):
+            on_progress(f"Importing save {os.path.basename(sp)} into native engine…")
+        return self.import_and_load_save(
+            sp,
+            club_name_hint=club_name_hint or "",
+            tactic_index=tactic_index,
+            exclude_player_uids=exclude_player_uids,
+            on_progress=on_progress,
+        )
+
+    def wait_for_job(self, job_id: str, *, timeout_seconds: float = 180.0,
+                     poll_interval: float = 1.5,
+                     on_progress: Any = None) -> dict[str, Any]:
+        """Poll a running Tactics Lab job until completion or timeout."""
+        jid = (job_id or "").strip()
+        if not jid:
+            raise TacticsLabError("job_id is required")
+        deadline = time.monotonic() + max(5.0, float(timeout_seconds or 180.0))
+        last_key = ""
+        latest: dict[str, Any] | None = None
+        while True:
+            jobs = self.list_jobs()
+            cur = next((j for j in jobs if j.get("id") == jid), None)
+            if cur is not None:
+                latest = cur
+                done = int(cur.get("completed") or 0)
+                total = int(cur.get("total") or 0)
+                status = str(cur.get("status") or "")
+                stage = str(cur.get("stage") or "")
+                key = f"{status}:{done}/{total}:{stage}"
+                if callable(on_progress) and key != last_key:
+                    last_key = key
+                    msg = f"Match Lab {done}/{total} matches" + (f" · {stage}" if stage else "")
+                    on_progress(msg)
+                if status not in ("queued", "running"):
+                    return {"done": True, "timed_out": False, "job": cur}
+            if time.monotonic() >= deadline:
+                return {"done": False, "timed_out": True, "job": latest}
+            time.sleep(max(0.4, float(poll_interval)))
+
+    def compare_tactics(self, candidates: list[dict[str, Any]], *,
+                        mode: str = "league",
+                        club_name_hint: str = "",
+                        opponent_count: int = 4,
+                        matches_per_opponent: int = 2,
+                        timeout_per_job: float = 180.0,
+                        on_progress: Any = None) -> dict[str, Any]:
+        """Benchmark 2-5 candidate tactics on identical fixed seeds and rank them.
+
+        Tactic 0 acts as the shared baseline (A), and every other candidate (1..N-1)
+        is run head-to-head against A on the same fixed seeds and league opponents so
+        all candidates are directly comparable by PPG / GD / xGD.
+        """
+        if not isinstance(candidates, list) or len(candidates) < 2:
+            raise TacticsLabError("At least 2 tactic candidates are required.")
+        capped = candidates[:5]
+
+        auto_loaded = None
+        if mode == "league":
+            auto_loaded = self.ensure_save_loaded(
+                club_name_hint=club_name_hint, on_progress=on_progress)
+
+        baseline = capped[0]
+        standings: list[dict[str, Any]] = []
+        pairings: list[dict[str, Any]] = []
+        baseline_recorded = False
+
+        for idx, challenger in enumerate(capped[1:], start=1):
+            label = f"Pair {idx}/{len(capped) - 1}"
+            if callable(on_progress):
+                on_progress(f"{label}: starting paired native match simulation…")
+            started = self.start_ab_test(
+                tactic_a=baseline,
+                tactic_b=challenger,
+                mode=mode,
+                opponent_count=opponent_count,
+                matches_per_opponent=matches_per_opponent,
+                event_details=False,
+            )
+            waited = self.wait_for_job(
+                str(started.get("job_id") or ""),
+                timeout_seconds=timeout_per_job,
+                on_progress=(
+                    (lambda m, p=label: on_progress(f"{p} · {m}"))
+                    if callable(on_progress) else None
+                ),
+            )
+            job = waited.get("job") or {}
+            groups = job.get("groups") or {}
+            g_a = groups.get("A")
+            g_b = groups.get("B")
+            if g_a and not baseline_recorded:
+                standings.append({
+                    "candidate_index": 0,
+                    "source": baseline,
+                    "tactic_name": g_a.get("tactic_name") or started.get("tactic_a") or "Baseline",
+                    "matches": g_a.get("matches", 0),
+                    "verified": g_a.get("verified", 0),
+                    "wins": g_a.get("wins", 0),
+                    "draws": g_a.get("draws", 0),
+                    "losses": g_a.get("losses", 0),
+                    "ppg": g_a.get("ppg", 0.0),
+                    "gd": g_a.get("gd", 0),
+                    "gf": g_a.get("gf", 0),
+                    "ga": g_a.get("ga", 0),
+                    "xgd": g_a.get("xgd", 0.0),
+                    "xgf": g_a.get("xgf", 0.0),
+                    "xga": g_a.get("xga", 0.0),
+                    "validation_scope": job.get("validation_scope") or [],
+                })
+                baseline_recorded = True
+            if g_b:
+                standings.append({
+                    "candidate_index": idx,
+                    "source": challenger,
+                    "tactic_name": g_b.get("tactic_name") or started.get("tactic_b") or f"Candidate {idx}",
+                    "matches": g_b.get("matches", 0),
+                    "verified": g_b.get("verified", 0),
+                    "wins": g_b.get("wins", 0),
+                    "draws": g_b.get("draws", 0),
+                    "losses": g_b.get("losses", 0),
+                    "ppg": g_b.get("ppg", 0.0),
+                    "gd": g_b.get("gd", 0),
+                    "gf": g_b.get("gf", 0),
+                    "ga": g_b.get("ga", 0),
+                    "xgd": g_b.get("xgd", 0.0),
+                    "xgf": g_b.get("xgf", 0.0),
+                    "xga": g_b.get("xga", 0.0),
+                    "delta_ppg_vs_baseline": round(
+                        float(g_b.get("ppg", 0.0)) - float((g_a or {}).get("ppg", 0.0)), 2),
+                    "delta_xgd_vs_baseline": round(
+                        float(g_b.get("xgd", 0.0)) - float((g_a or {}).get("xgd", 0.0)), 2),
+                    "validation_scope": job.get("validation_scope") or [],
+                })
+            pairings.append({
+                "job_id": started.get("job_id"),
+                "mode": started.get("mode"),
+                "tactic_a": started.get("tactic_a"),
+                "tactic_b": started.get("tactic_b"),
+                "status": job.get("status"),
+                "verified_matches": job.get("verified_matches", 0),
+                "total": job.get("total", 0),
+                "validation_scope": job.get("validation_scope") or [],
+                "winner": job.get("winner") or "",
+                "timed_out": bool(waited.get("timed_out")),
+            })
+
+        standings.sort(key=lambda r: (r["ppg"], r["gd"], r["xgd"]), reverse=True)
+        for rank, row in enumerate(standings, start=1):
+            row["rank"] = rank
+
+        return {
+            "ok": True,
+            "mode": pairings[0]["mode"] if pairings else mode,
+            "club": self.loaded_club_name or club_name_hint,
+            "auto_loaded_save": bool(auto_loaded),
+            "opponents_count": opponent_count if self.loaded_save_id else 0,
+            "matches_per_opponent": matches_per_opponent,
+            "ranking": standings,
+            "best_tactic": standings[0] if standings else None,
+            "pairings": pairings,
+        }
 
 
 def _summarize_job(job: dict[str, Any]) -> dict[str, Any]:

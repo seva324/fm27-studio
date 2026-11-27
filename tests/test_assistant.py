@@ -98,6 +98,60 @@ class EndpointTests(unittest.TestCase):
     def test_a_failure_without_a_status_keeps_none(self):
         self.assertIsNone(A.AssistantError("no key").status)
 
+    def test_remote_disconnect_is_retried_and_wrapped_cleanly(self):
+        import http.client
+        import io
+
+        class _FakeResp:
+            headers = {"Content-Type": "text/event-stream"}
+
+            def __init__(self, lines):
+                self._lines = lines
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def __iter__(self):
+                return iter(self._lines)
+
+        sse_lines = [
+            b'data: {"choices":[{"delta":{"reasoning_content":"Think"}}]}\n',
+            b'data: {"choices":[{"delta":{"content":"Done"}}]}\n',
+            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"fm27_","arguments":"{\\"a\\":"}}]}}]}\n',
+            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"ok","arguments":"1}"}}]}}]}\n',
+            b'data: {"choices":[],"usage":{"completion_tokens_details":{"reasoning_tokens":42}}}\n',
+            b'data: [DONE]\n',
+        ]
+        attempts = {"n": 0}
+
+        def flaky_urlopen(req, timeout=None):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise http.client.RemoteDisconnected("Remote end closed connection without response")
+            return _FakeResp(sse_lines)
+
+        with mock.patch.object(A.urllib.request, "urlopen", side_effect=flaky_urlopen), \
+                mock.patch.object(A.time, "sleep", return_value=None):
+            out = A._http_chat(A.AssistantSettings(), "key", [{"role": "user", "content": "Hi"}])
+        self.assertEqual(attempts["n"], 2)
+        msg = out["choices"][0]["message"]
+        self.assertEqual(msg["content"], "Done")
+        self.assertEqual(msg["reasoning_content"], "Think")
+        self.assertEqual(msg["tool_calls"][0]["function"]["name"], "fm27_ok")
+        self.assertEqual(msg["tool_calls"][0]["function"]["arguments"], '{"a":1}')
+        self.assertEqual(A._extract_reasoning_tokens(out), 42)
+
+        with mock.patch.object(
+            A.urllib.request, "urlopen",
+            side_effect=http.client.RemoteDisconnected("Remote end closed connection without response"),
+        ), mock.patch.object(A.time, "sleep", return_value=None):
+            with self.assertRaises(A.AssistantError) as caught:
+                A._http_chat(A.AssistantSettings(), "key", [{"role": "user", "content": "Hi"}])
+        self.assertIn("closed the connection", str(caught.exception))
+
 
 class HistoryContractTests(unittest.TestCase):
     """A1: one user turn per request, even when the caller already recorded it."""

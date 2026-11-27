@@ -40,7 +40,8 @@ from .fmplans import (ACTIVITY_BY_ID, DAYS, TEAM_INSTRUCTION_KEYS,
                       training_activities, training_week)
 # --- the rules and readers, re-exported ------------------------------------
 from .fmlineup import Assignment, Constraints, optimize_lineup
-from .fmlookup import find_clubs, fixtures, player_detail, search_players
+from .fmlookup import (find_clubs, fixtures, player_detail, search_players,
+                       search_staff)
 from .fmroles import (ABILITY_SHARE, DEFAULT_MINIMUM_POSITION, LABEL_POSITIONS,
                       LABEL_TO_GENERAL, OUT_ROLE_PREFERENCE, PHASE_IN, PHASE_OUT,
                       POSITION_FIELDS, POSITION_LABELS, POSITION_SHARE,
@@ -207,6 +208,35 @@ def tool_specs() -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
+                "name": "fm27_find_staff",
+                "description": (
+                    "Search a club's COMPLETE backroom staff roster (all 90+ staff, "
+                    "not capped at 12) or search globally for coaches, scouts, "
+                    "physios, HoYD, DoF, sports scientists, and analysts, ranked by "
+                    "official FM coaching/role star ratings (0.5-5.0★) using live "
+                    "attributes when attached to FM27."),
+                "parameters": _schema({
+                    "club": _string("Exact club name to inspect all staff at that club (omit to search all 23k+ staff)"),
+                    "name": _string("Part of staff name or club"),
+                    "job": _string("Exact job title, e.g. 'Coach', 'Fitness Coach', 'Goalkeeping Coach', 'Scout', 'Physiotherapist', 'Head of Youth Development'"),
+                    "role_category": _string(
+                        "FM star rating category to score & sort by: attacking_tactical, "
+                        "attacking_technical, defending_tactical, defending_technical, "
+                        "possession_tactical, possession_technical, fitness, "
+                        "gk_shot_stopping, gk_handling, set_pieces, scout, physio, "
+                        "sports_scientist, hoyd, dof, analyst"),
+                    "min_ca": _integer("Minimum Current Ability"),
+                    "max_ca": _integer("Maximum Current Ability"),
+                    "min_pa": _integer("Minimum Potential Ability"),
+                    "max_pa": _integer("Maximum Potential Ability"),
+                    "min_stars": {"type": "number", "description": "Minimum FM star rating (0.5 to 5.0)"},
+                    "limit": _integer("Maximum staff to return, 1-150, default 60 (pass 120 to inspect a full club staff)"),
+                }),
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "fm27_analyze_squad",
                 "description": (
                     "Squad depth by position, tactic fit for a shape, contract "
@@ -364,15 +394,44 @@ def tool_specs() -> list[dict[str, Any]]:
             "function": {
                 "name": "fm27_create_training_schedule",
                 "description": (
-                    "Build a seven-day, three-session training week from a focus "
-                    "such as Pressing, Attacking, Ball control, Recovery, Team "
-                    "bonding or Balanced, using FM27's measured activity ids."),
+                    "Build a validated seven-day, three-session FM27 training week "
+                    "(from a focus preset OR a custom 7x3 `days` matrix of FM27 activity "
+                    "IDs/names) AND export it as a genuine loadable `.fmf` training "
+                    "schedule file directly into the user's FM27/schedules folder so they "
+                    "can immediately load it via Training > Schedules > Load."),
                 "parameters": _schema({
-                    "focus": _string("What the week should work on"),
-                    "name": _string("Name for the schedule"),
+                    "focus": _string("Focus preset (Balanced, Tactical, Pressing, Attacking, Ball control, Physical, Recovery, Team bonding) or label when using custom `days`"),
+                    "name": _string("Name for the schedule (also used as the exported .fmf filename)"),
                     "match_day": _string(
                         "Day the match falls on, for example Saturday"),
+                    "days": {
+                        "type": "array",
+                        "items": {
+                            "type": "array",
+                            "items": {"type": "integer"},
+                        },
+                        "description": (
+                            "Optional custom 7-day x 3-session matrix (Monday..Sunday) of "
+                            "measured FM27 activity IDs (e.g. [[301,300,300], ..., [500,300,300], [300,300,300]]). "
+                            "Pass this whenever tailoring a custom week instead of asking the user to tweak a preset."
+                        ),
+                    },
+                    "description": _string("Optional description embedded inside the .tsc training schedule"),
+                    "export_fmf": _boolean("Export a real loadable .fmf file into FM27/schedules (default true when name or days is provided)"),
                 }, ("focus",)),
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "fm27_read_training_schedule",
+                "description": (
+                    "Read and decode an existing local FM27 .fmf training schedule "
+                    "from the user's FM27/schedules folder to inspect its 7-day "
+                    "sessions and description."),
+                "parameters": _schema({
+                    "filename": _string("Schedule filename or path inside FM27/schedules, e.g. 'FM AI Week 1.fmf'"),
+                }, ("filename",)),
             },
         },
         {
@@ -466,9 +525,34 @@ def tool_specs() -> list[dict[str, Any]]:
                 "name": "fm27_lab_status",
                 "description": (
                     "Check whether the native FM27 Tactics Lab match engine is installed "
-                    "and ready to simulate. If installed=false, ask the user if they want "
-                    "to download it from https://github.com/seva324/fm-tactics-lab."),
+                    "and ready to simulate, plus currently loaded save and local saves/tactics. "
+                    "If installed=false, ask the user if they want to download it from "
+                    "https://github.com/seva324/fm-tactics-lab."),
                 "parameters": _schema({}),
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "fm27_lab_list_local",
+                "description": (
+                    "List the user's local FM27 .fm save files (games folder), local "
+                    ".fmf tactic files (tactics folder), and local .fmf training schedule "
+                    "files (schedules folder) without guessing filenames."),
+                "parameters": _schema({}),
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "fm27_lab_download_engine",
+                "description": (
+                    "Download FM27 Tactics Lab from https://github.com/seva324/fm-tactics-lab "
+                    "into local app storage. ONLY call with confirm=true AFTER the user "
+                    "explicitly agrees to download it."),
+                "parameters": _schema({
+                    "confirm": _boolean("Must be true only after the user confirms download"),
+                }, ("confirm",)),
             },
         },
         {
@@ -489,12 +573,47 @@ def tool_specs() -> list[dict[str, Any]]:
                 "name": "fm27_lab_load_save",
                 "description": (
                     "Import an FM27 .fm save into the native Tactics Lab engine, load the "
-                    "managed club onto the tactics board, and discover league opponents."),
+                    "managed club onto the tactics board, return its real current squad "
+                    "(already excluding loaned-out players), and discover real league opponents. "
+                    "Pass exclude_player_uids to exclude injured or on-holiday players."),
                 "parameters": _schema({
                     "save_path": _string("Path to .fm save file (omit to load the newest save)"),
                     "club": _string("Club name hint; defaults to the managed club"),
                     "tactic_index": _integer("Saved tactic slot index, default 0"),
+                    "exclude_player_uids": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Optional player unique_ids to exclude from lineup/bench (e.g. injured or on holiday)",
+                    },
                 }),
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "fm27_lab_create_tactic",
+                "description": (
+                    "Create a real, native FM27 engine-validated custom tactic tailored to the "
+                    "club's squad (formation, mentality, per-position roles, and team instructions), "
+                    "validate it through Tactics Lab, and export it as a genuine .fmf file into "
+                    "the user's FM27 tactics folder so it can be immediately A/B tested with "
+                    "fm27_lab_run_ab_test and loaded in-game."),
+                "parameters": _schema({
+                    "name": _string("Name for the new tactic (used as .fmf filename)"),
+                    "formation": _string("Formation such as '4-2-3-1', '4-3-3', '3-4-2-1', '4-4-2', '3-5-2', '4-2-4', '5-2-3', '4-1-2-1-2'"),
+                    "mentality": _string("Mentality: 'Very Defensive', 'Defensive', 'Cautious', 'Balanced', 'Positive', 'Attacking', 'Very Attacking'"),
+                    "roles": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "description": "Optional role overrides by position id, e.g. {'GK':'BallPlayingGoalkeeper','DML':'DeepLyingPlaymaker','AMC':'AttackingMidfielder'}",
+                    },
+                    "instructions": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "description": "Optional team instructions, e.g. {'PassingDirectness':'Shorter','Tempo':'Higher','TriggerPress':'More Often','DefensiveTransition':'Counter-Press','PressingTrap':'Standard'}",
+                    },
+                    "save_to_tactics_folder": _boolean("Export .fmf directly into FM27/tactics folder (default true)"),
+                }, ("name", "formation")),
             },
         },
         {
@@ -502,20 +621,84 @@ def tool_specs() -> list[dict[str, Any]]:
             "function": {
                 "name": "fm27_lab_run_ab_test",
                 "description": (
-                    "Run a native FM27 match-engine test or A/B comparison (Tactic A vs Tactic B) "
-                    "against league opponents or neutral fixtures. Tactics can come from 'save', "
-                    "'local_fmf' (filename/path), or 'fm_arena' (thread URL). Always report "
-                    "verified count and validation_scope honestly."),
+                    "Run a native FM27 match-engine test or paired A/B comparison "
+                    "(Tactic A vs Tactic B) on fixed seeds against real league opponents "
+                    "(automatically imports the newest .fm save if mode='league' and none "
+                    "is loaded yet) or neutral quick fixtures. Uses parallel native workers "
+                    "('auto') by default. For a 300-match A/B test, e.g. 15 opponents x "
+                    "10 matches_per_opponent = 150 per side (300 total matches). Always "
+                    "report verified_matches and validation_scope honestly."),
                 "parameters": _schema({
                     "tactic_b_kind": _string("'local_fmf', 'fm_arena', or 'save'"),
                     "tactic_b_ref": _string("Filename/path for local_fmf, URL for fm_arena, or slot index for save"),
                     "tactic_a_kind": _string("Optional baseline Tactic A kind ('save', 'local_fmf', 'fm_arena') for A/B test"),
                     "tactic_a_ref": _string("Optional baseline Tactic A filename/path, URL, or slot index"),
-                    "mode": _string("'league' (requires loaded save) or 'quick'"),
-                    "opponent_count": _integer("Number of league opponents, default 4"),
-                    "matches_per_opponent": _integer("Even number of home+away matches per opponent, default 2"),
-                    "wait": _boolean("Wait for short tests to finish (up to 90s) and return verified results"),
+                    "club": _string("Club name hint when auto-loading the local .fm save"),
+                    "mode": _string("'league' (uses club's .fm save & league opponents) or 'quick'"),
+                    "opponent_count": _integer("Number of league opponents, default 4 (1-20)"),
+                    "matches_per_opponent": _integer("Even number of home+away matches per opponent, default 2 (e.g. 10 with 15 opponents = 300 total A/B matches)"),
+                    "workers": _string("Parallel native workers: 'auto' (recommended, default) or integer like '4'"),
+                    "exclude_player_uids": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Optional player unique_ids to exclude from lineup/bench (injured / on holiday)",
+                    },
+                    "wait": _boolean("Wait for the test to finish (default true) and return verified results"),
+                    "timeout_seconds": _integer("Max seconds to wait when wait=true (default 240, max 900)"),
                 }, ("tactic_b_kind",)),
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "fm27_lab_compare_tactics",
+                "description": (
+                    "Run a multi-tactic native match-engine benchmark comparing 2 to 5 "
+                    "candidate tactics (from 'save', 'local_fmf', or 'fm_arena') against the "
+                    "same fixed seeds and league opponents, then rank them by verified PPG, "
+                    "GD, and xGD to select the strongest tactic for the club."),
+                "parameters": _schema({
+                    "tactics": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "kind": _string("'save', 'local_fmf', or 'fm_arena'"),
+                                "ref": _string("Slot index for save, filename/path for local_fmf, or FM-Arena URL"),
+                            },
+                            "required": ["kind"],
+                        },
+                        "description": "2 to 5 candidate tactics; index 0 is the shared paired baseline",
+                    },
+                    "club": _string("Club name hint when auto-loading the local .fm save"),
+                    "mode": _string("'league' (default) or 'quick'"),
+                    "opponent_count": _integer("Number of league opponents, default 4"),
+                    "matches_per_opponent": _integer("Even home+away matches per opponent, default 2"),
+                    "timeout_seconds": _integer("Max seconds per pairing, default 180"),
+                }, ("tactics",)),
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "fm27_lab_wait_job",
+                "description": (
+                    "Wait for an in-progress FM27 Tactics Lab simulation job_id to finish "
+                    "and return its verified results."),
+                "parameters": _schema({
+                    "job_id": _string("Job ID returned by fm27_lab_run_ab_test or fm27_lab_jobs"),
+                    "timeout_seconds": _integer("Max seconds to wait (default 180, max 300)"),
+                }, ("job_id",)),
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "fm27_lab_cancel_job",
+                "description": "Cancel the currently running FM27 Tactics Lab simulation job.",
+                "parameters": _schema({
+                    "confirm": _boolean("Set true to cancel the active simulation job"),
+                }, ("confirm",)),
             },
         },
         {
@@ -567,7 +750,8 @@ def _attribute_floors(value: Any) -> dict[str, int] | None:
 
 
 def execute_tool(db: Any, name: str, arguments: dict[str, Any],
-                 default_club: str = "") -> dict[str, Any]:
+                 default_club: str = "",
+                 on_progress: Any = None) -> dict[str, Any]:
     """Run one tool by name. Every failure is a readable result, never a raise."""
     args = arguments if isinstance(arguments, dict) else {}
     tool = (name or "").strip()
@@ -594,6 +778,25 @@ def execute_tool(db: Any, name: str, arguments: dict[str, Any],
             return find_clubs(
                 db, str(args.get("name") or ""), str(args.get("nation") or ""),
                 str(args.get("competition") or ""), as_int(args.get("limit"), 12))
+        if tool == "fm27_find_staff":
+            raw_stars = args.get("min_stars")
+            try:
+                min_stars_val = float(raw_stars) if raw_stars is not None else None
+            except (TypeError, ValueError):
+                min_stars_val = None
+            return search_staff(
+                db,
+                query=str(args.get("name") or ""),
+                club=str(args.get("club") or ""),
+                job=str(args.get("job") or ""),
+                role_category=str(args.get("role_category") or ""),
+                min_ca=args.get("min_ca"),
+                max_ca=args.get("max_ca"),
+                min_pa=args.get("min_pa"),
+                max_pa=args.get("max_pa"),
+                min_stars=min_stars_val,
+                limit=as_int(args.get("limit"), 60),
+            )
         if tool == "fm27_analyze_squad":
             return analyze_squad(
                 db, club(), as_int(args.get("minimum_position_score"),
@@ -653,9 +856,50 @@ def execute_tool(db: Any, name: str, arguments: dict[str, Any],
                 str(args.get("position") or ""), str(args.get("role") or ""),
                 str(args.get("phase") or PHASE_IN))
         if tool == "fm27_create_training_schedule":
-            return training_week(str(args.get("focus") or "Balanced"),
-                                 str(args.get("name") or ""),
-                                 str(args.get("match_day") or ""))
+            from . import schedulefiles, tacticweb
+            plan_name = str(args.get("name") or "")
+            raw_days = args.get("days")
+            desc = str(args.get("description") or "")
+            raw_export = args.get("export_fmf")
+            result = training_week(
+                str(args.get("focus") or "Balanced"),
+                plan_name,
+                str(args.get("match_day") or ""),
+                days=raw_days,
+            )
+            if "error" not in result:
+                result["schedules_dir"] = tacticweb.detect_fm27_schedules_dir()
+                should_export = (
+                    bool(raw_export)
+                    if raw_export is not None
+                    else bool(plan_name.strip() or raw_days is not None)
+                )
+                if should_export:
+                    week_ids = [
+                        [int(s["id"]) for s in day["sessions"]]
+                        for day in result["days"]
+                    ]
+                    desc_text = desc.strip() or (
+                        " ".join(result.get("notes") or [])[:240]
+                        or f"Generated by FM27 Studio ({result['focus']})"
+                    )
+                    exported = schedulefiles.export_schedule_fmf(
+                        result["name"], week_ids, description=desc_text
+                    )
+                    result["exports_fmf"] = True
+                    result["exported"] = exported
+                    result["exported_path"] = exported["path"]
+                    result["filename"] = exported["filename"]
+                    result["size"] = exported["size"]
+                    result["import_step"] = exported["import_step"]
+                    result["ok"] = True
+            return result
+        if tool == "fm27_read_training_schedule":
+            from . import schedulefiles
+            fname = str(args.get("filename") or "").strip()
+            if not fname:
+                return {"error": "filename is required"}
+            return schedulefiles.read_schedule_fmf(fname)
         if tool == "fm27_training_activities":
             return training_activities()
         if tool == "fm27_search_knowledge":
@@ -681,25 +925,97 @@ def execute_tool(db: Any, name: str, arguments: dict[str, Any],
             return tacticweb.download_fm_arena_tactic(str(args.get("url") or ""))
         if tool == "fm27_lab_status":
             return _get_lab_client().status()
+        if tool == "fm27_lab_list_local":
+            from . import tacticslab, tacticweb
+            return {
+                "ok": True,
+                "saves": tacticslab.list_local_saves(),
+                "tactics": tacticweb.list_local_fmf("tactics"),
+                "schedules": tacticweb.list_local_fmf("schedules"),
+            }
+        if tool == "fm27_lab_download_engine":
+            if not bool(args.get("confirm")):
+                from . import tacticslab
+                return {
+                    "ok": False,
+                    "error": (
+                        "Confirmation required: ask the user first, then call "
+                        "fm27_lab_download_engine(confirm=true) to download "
+                        f"{tacticslab.LAB_REPO_URL}."
+                    ),
+                }
+            return _lab_download_engine()
         if tool == "fm27_lab_inspect_fmf":
             return _lab_inspect_fmf(str(args.get("path") or ""))
         if tool == "fm27_lab_load_save":
-            return _lab_load_save(
-                str(args.get("save_path") or ""),
-                club() or default_club,
-                as_int(args.get("tactic_index"), 0),
+            sp = str(args.get("save_path") or "").strip()
+            ch = club() or default_club
+            if not sp and not ch:
+                return {"error": "Provide save_path or club to load a save into Tactics Lab."}
+            excl = _int_list(args.get("exclude_player_uids"))
+            return _lab_load_save(sp, ch, as_int(args.get("tactic_index"), 0),
+                                  exclude_player_uids=excl, on_progress=on_progress)
+        if tool == "fm27_lab_create_tactic":
+            tname = str(args.get("name") or "").strip()
+            tform = str(args.get("formation") or "").strip()
+            if not tname and not tform:
+                return {"error": "Provide name and formation (e.g. '4-2-3-1') to create a native .fmf tactic."}
+            return _lab_create_tactic(
+                name=tname or f"Custom {tform}",
+                formation=tform or "4-2-3-1",
+                mentality=str(args.get("mentality") or "Balanced"),
+                roles=args.get("roles") if isinstance(args.get("roles"), dict) else None,
+                instructions=args.get("instructions") if isinstance(args.get("instructions"), dict) else None,
+                save_to_tactics_folder=bool(args.get("save_to_tactics_folder", True)),
             )
         if tool == "fm27_lab_run_ab_test":
+            tb_kind = str(args.get("tactic_b_kind") or "").strip()
+            if not tb_kind:
+                return {"error": "tactic_b_kind is required ('save', 'local_fmf', or 'fm_arena')."}
             return _lab_run_ab_test(
-                tactic_b_kind=str(args.get("tactic_b_kind") or "save"),
+                tactic_b_kind=tb_kind,
                 tactic_b_ref=str(args.get("tactic_b_ref") or ""),
                 tactic_a_kind=str(args.get("tactic_a_kind") or ""),
                 tactic_a_ref=str(args.get("tactic_a_ref") or ""),
+                club_hint=club() or default_club,
                 mode=str(args.get("mode") or "league"),
                 opponent_count=as_int(args.get("opponent_count"), 4),
                 matches_per_opponent=as_int(args.get("matches_per_opponent"), 2),
+                workers=str(args.get("workers") or "auto"),
+                exclude_player_uids=_int_list(args.get("exclude_player_uids")),
                 wait=bool(args.get("wait", True)),
+                timeout_seconds=as_int(args.get("timeout_seconds"), 240),
+                on_progress=on_progress,
             )
+        if tool == "fm27_lab_compare_tactics":
+            raw_tactics = args.get("tactics")
+            if not isinstance(raw_tactics, list) or len(raw_tactics) < 2:
+                return {"error": "tactics must be a list of 2 to 5 tactic objects ({kind, ref})."}
+            return _lab_compare_tactics(
+                tactics=raw_tactics,
+                club_hint=club() or default_club,
+                mode=str(args.get("mode") or "league"),
+                opponent_count=as_int(args.get("opponent_count"), 4),
+                matches_per_opponent=as_int(args.get("matches_per_opponent"), 2),
+                timeout_seconds=as_int(args.get("timeout_seconds"), 180),
+                on_progress=on_progress,
+            )
+        if tool == "fm27_lab_wait_job":
+            jid = str(args.get("job_id") or "").strip()
+            if not jid:
+                return {"error": "job_id is required."}
+            return _lab_wait_job(
+                jid,
+                timeout_seconds=as_int(args.get("timeout_seconds"), 180),
+                on_progress=on_progress,
+            )
+        if tool == "fm27_lab_cancel_job":
+            if not bool(args.get("confirm")):
+                return {"error": "Pass confirm=true to cancel the active Lab simulation job."}
+            client = _get_lab_client()
+            if not client.installed:
+                return _lab_missing_response()
+            return {"ok": True, "result": client.cancel_job()}
         if tool == "fm27_lab_jobs":
             client = _get_lab_client()
             if not client.installed:
@@ -765,7 +1081,23 @@ def _lab_inspect_fmf(raw_path: str) -> dict[str, Any]:
     return res
 
 
-def _lab_load_save(save_path: str, club_hint: str, tactic_index: int) -> dict[str, Any]:
+def _int_list(value: Any) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    out: list[int] = []
+    for item in value:
+        try:
+            n = int(item)
+            if n > 0:
+                out.append(n)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _lab_load_save(save_path: str, club_hint: str, tactic_index: int,
+                   exclude_player_uids: list[int] | None = None,
+                   on_progress: Any = None) -> dict[str, Any]:
     from . import tacticslab
     client = _get_lab_client()
     if not client.installed:
@@ -780,35 +1112,128 @@ def _lab_load_save(save_path: str, club_hint: str, tactic_index: int) -> dict[st
         sp,
         club_name_hint=club_hint or "",
         tactic_index=tactic_index,
+        exclude_player_uids=exclude_player_uids,
+        on_progress=on_progress,
+    )
+
+
+def _lab_create_tactic(*, name: str, formation: str, mentality: str,
+                       roles: dict[str, str] | None,
+                       instructions: dict[str, str] | None,
+                       save_to_tactics_folder: bool) -> dict[str, Any]:
+    client = _get_lab_client()
+    if not client.installed:
+        return _lab_missing_response()
+    return client.create_custom_tactic(
+        name=name,
+        formation=formation,
+        mentality=mentality,
+        roles=roles,
+        instructions=instructions,
+        save_to_tactics_folder=save_to_tactics_folder,
+    )
+
+
+def _lab_download_engine() -> dict[str, Any]:
+    from . import tacticslab
+    res = tacticslab.download_lab_from_github()
+    client = _get_lab_client()
+    client.refresh_install()
+    res["status"] = client.status()
+    return res
+
+
+def _lab_wait_job(job_id: str, *, timeout_seconds: int = 240,
+                  on_progress: Any = None) -> dict[str, Any]:
+    client = _get_lab_client()
+    if not client.installed:
+        return _lab_missing_response()
+    capped_timeout = max(10, min(900, int(timeout_seconds or 240)))
+    waited = client.wait_for_job(
+        job_id,
+        timeout_seconds=float(capped_timeout),
+        on_progress=on_progress,
+    )
+    return {"ok": True, "job_id": job_id, **waited}
+
+
+def _lab_compare_tactics(*, tactics: list[Any], club_hint: str,
+                         mode: str, opponent_count: int,
+                         matches_per_opponent: int, timeout_seconds: int,
+                         on_progress: Any = None) -> dict[str, Any]:
+    client = _get_lab_client()
+    if not client.installed:
+        return _lab_missing_response()
+    specs: list[dict[str, Any]] = []
+    for item in tactics[:5]:
+        if isinstance(item, dict):
+            specs.append(_tactic_spec(str(item.get("kind") or "save"), str(item.get("ref") or "")))
+    if len(specs) < 2:
+        return {"error": "At least 2 valid tactic specs are required."}
+    capped_timeout = max(15, min(900, int(timeout_seconds or 240)))
+    return client.compare_tactics(
+        specs,
+        mode=mode,
+        club_name_hint=club_hint,
+        opponent_count=opponent_count,
+        matches_per_opponent=matches_per_opponent,
+        timeout_per_job=float(capped_timeout),
+        on_progress=on_progress,
     )
 
 
 def _lab_run_ab_test(*, tactic_b_kind: str, tactic_b_ref: str,
                      tactic_a_kind: str, tactic_a_ref: str,
+                     club_hint: str = "",
                      mode: str, opponent_count: int,
-                     matches_per_opponent: int, wait: bool) -> dict[str, Any]:
-    import time
+                     matches_per_opponent: int,
+                     workers: str = "auto",
+                     exclude_player_uids: list[int] | None = None,
+                     wait: bool,
+                     timeout_seconds: int = 240,
+                     on_progress: Any = None) -> dict[str, Any]:
     client = _get_lab_client()
     if not client.installed:
         return _lab_missing_response()
+    auto_loaded = None
+    if mode == "league":
+        auto_loaded = client.ensure_save_loaded(
+            club_name_hint=club_hint,
+            exclude_player_uids=exclude_player_uids,
+            on_progress=on_progress,
+        )
     tb = _tactic_spec(tactic_b_kind, tactic_b_ref)
     ta = _tactic_spec(tactic_a_kind, tactic_a_ref) if tactic_a_kind.strip() else None
+    if callable(on_progress):
+        on_progress("Starting native FM27 match-engine simulation…")
     started = client.start_ab_test(
         tactic_b=tb,
         tactic_a=ta,
         mode=mode,
         opponent_count=opponent_count,
         matches_per_opponent=matches_per_opponent,
+        workers=workers,
+        exclude_player_uids=exclude_player_uids,
         event_details=False,
     )
+    if auto_loaded:
+        started["auto_loaded_save"] = {
+            "club_name": auto_loaded.get("club_name"),
+            "save_path": auto_loaded.get("save_path"),
+            "opponents_count": auto_loaded.get("opponents_count"),
+        }
     if wait and started.get("job_id"):
-        jid = started["job_id"]
-        deadline = time.monotonic() + 90.0
-        while time.monotonic() < deadline:
-            jobs = client.list_jobs()
-            cur = next((j for j in jobs if j.get("id") == jid), None)
-            if cur and cur.get("status") not in ("queued", "running"):
-                started["result"] = cur
-                return started
-            time.sleep(1.5)
+        capped_timeout = max(10, min(900, int(timeout_seconds or 240)))
+        waited = client.wait_for_job(
+            str(started["job_id"]),
+            timeout_seconds=float(capped_timeout),
+            on_progress=on_progress,
+        )
+        started["result"] = waited.get("job")
+        started["timed_out"] = bool(waited.get("timed_out"))
+        if waited.get("timed_out"):
+            started["guidance"] = (
+                "The simulation is still running in Tactics Lab; call "
+                f"fm27_lab_wait_job(job_id='{started['job_id']}', timeout_seconds=600) to finish collecting results."
+            )
     return started

@@ -422,19 +422,31 @@ def fitness_score(player: dict[str, Any]) -> int:
     return (condition_percent(player) + sharpness_percent(player)) // 2
 
 
-def unavailable_reason(player: dict[str, Any]) -> str | None:
+def unavailable_reason(player: dict[str, Any], for_club: str = "") -> str | None:
     """Why a player cannot be picked for this club, or None when they can.
 
     Loaned-out players and players whose transfer is already agreed are
     registered at the club but will not play for it, so naming them would be
-    wrong even though the squad list holds them.
+    wrong even though the squad list holds them. Players loaned *in* to
+    ``for_club`` (where ``playing_club`` matches ``for_club``) ARE available.
     """
+    target_club = (for_club or str(player.get("_for_club") or "")).strip().lower()
+    playing = str(player.get("playing_club") or "").strip()
+    loan_to = str(player.get("loan_club") or "").strip()
+    club = str(player.get("club") or "").strip()
+    if target_club and (
+        (playing and playing.lower() == target_club)
+        or (loan_to and loan_to.lower() == target_club)
+    ):
+        # On loan IN to target_club -> available for target_club
+        if truthy(player.get("transfer_agreed")):
+            to = player.get("future_transfer_club")
+            return f"transfer agreed with {to}" if to else "transfer agreed"
+        return None
     if truthy(player.get("is_loaned_out")):
-        at = player.get("playing_club")
+        at = playing or loan_to
         return f"loaned out to {at}" if at else "loaned out"
-    playing = player.get("playing_club")
-    club = player.get("club")
-    if playing and club and str(playing).strip().lower() != str(club).strip().lower():
+    if playing and club and playing.lower() != club.lower():
         return f"playing for {playing}"
     if truthy(player.get("transfer_agreed")):
         to = player.get("future_transfer_club")

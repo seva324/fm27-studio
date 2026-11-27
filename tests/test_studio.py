@@ -643,6 +643,459 @@ class StudioServerTests(unittest.TestCase):
         final_text = next(e["text"] for e in events2 if e.get("type") == "done")
         self.assertEqual(final_text, "Milan squad analysis complete.")
 
+    def test_ai_direct_lab_progress_compare_and_mcp_server(self) -> None:
+        """AI tools directly drive Tactics Lab with live progress, plus stdlib MCP stdio server."""
+        import fm27_mcp_server
+        from fmrte import fmtools
+
+        # 1) Fake Lab client verifies auto-save load + progress streaming + multi-tactic ranking
+        class _FakeLab:
+            installed = True
+            loaded_save_id = ""
+            loaded_club_name = ""
+            base_scenario = None
+            opponents_cache: list = []
+
+            def __init__(self):
+                self._jobs: dict[str, dict] = {}
+                self._seq = 0
+
+            def ensure_save_loaded(self, club_name_hint="", save_path="", tactic_index=0,
+                                   exclude_player_uids=None, on_progress=None):
+                if on_progress:
+                    on_progress("Importing Milan.fm into native engine…")
+                self.loaded_save_id = "save_1"
+                self.loaded_club_name = club_name_hint or "Milan"
+                self.base_scenario = {"teams": [{"tactic_name": "Save 4-2-3-1"}]}
+                self.opponents_cache = [{"key": "opp1", "club_uid": 1001}]
+                return {"ok": True, "club_name": self.loaded_club_name, "save_path": "Milan.fm", "opponents_count": 1}
+
+            def create_custom_tactic(self, *, name, formation="4-2-3-1", mentality="Balanced",
+                                     roles=None, instructions=None, save_to_tactics_folder=True):
+                return {"ok": True, "tactic_name": name, "formation": formation,
+                        "filename": f"{name}.fmf", "path": f"/tmp/{name}.fmf", "bytes": 1200}
+
+            def start_ab_test(self, *, tactic_b, tactic_a=None, mode="league", **_kw):
+                self._seq += 1
+                jid = f"job_{self._seq}"
+                b_name = tactic_b.get("path") or tactic_b.get("url") or "Tactic B"
+                a_name = (tactic_a or {}).get("path") or "Save 4-2-3-1"
+                b_ppg = 2.5 if "fast" in str(b_name).lower() else 1.5
+                self._jobs[jid] = {
+                    "id": jid, "name": f"AB {a_name} vs {b_name}", "status": "complete",
+                    "completed": 4, "total": 4, "verified_matches": 4,
+                    "validation_scope": ["native_match_score_and_team_statistics"],
+                    "groups": {
+                        "A": {"label": "A", "tactic_name": a_name, "matches": 2, "verified": 2,
+                              "wins": 1, "draws": 0, "losses": 1, "pts": 3, "ppg": 1.5,
+                              "gf": 2, "ga": 2, "gd": 0, "xgf": 2.1, "xga": 2.0, "xgd": 0.1},
+                        "B": {"label": "B", "tactic_name": b_name, "matches": 2, "verified": 2,
+                              "wins": 2 if b_ppg > 2 else 1, "draws": 0, "losses": 0 if b_ppg > 2 else 1,
+                              "pts": 6 if b_ppg > 2 else 3, "ppg": b_ppg,
+                              "gf": 4 if b_ppg > 2 else 2, "ga": 1 if b_ppg > 2 else 2,
+                              "gd": 3 if b_ppg > 2 else 0, "xgf": 3.4, "xga": 1.2, "xgd": 2.2},
+                    },
+                    "winner": f"B ({b_name})" if b_ppg > 1.5 else "Tie",
+                }
+                return {"ok": True, "mode": "league", "job_id": jid, "total": 4, "tactic_a": a_name, "tactic_b": b_name}
+
+            def wait_for_job(self, job_id, *, timeout_seconds=180.0, poll_interval=1.5, on_progress=None):
+                if on_progress:
+                    on_progress("Match Lab 2/4 matches · simulating")
+                    on_progress("Match Lab 4/4 matches · complete")
+                return {"done": True, "timed_out": False, "job": self._jobs[job_id]}
+
+            def compare_tactics(self, candidates, *, mode="league", club_name_hint="",
+                                opponent_count=4, matches_per_opponent=2,
+                                timeout_per_job=180.0, on_progress=None):
+                from fmrte.tacticslab import TacticsLabClient
+                return TacticsLabClient.compare_tactics(
+                    self, candidates, mode=mode, club_name_hint=club_name_hint,
+                    opponent_count=opponent_count, matches_per_opponent=matches_per_opponent,
+                    timeout_per_job=timeout_per_job, on_progress=on_progress)
+
+            def status(self):
+                return {"installed": True, "can_simulate": True, "compatible": True}
+
+            def list_jobs(self):
+                return list(self._jobs.values())
+
+            def stop(self):
+                pass
+
+        fake_lab = _FakeLab()
+        progress_log: list[str] = []
+        orig_lab = fmtools._SHARED_LAB_CLIENT
+        try:
+            fmtools.set_lab_client(fake_lab)
+            res = fmtools.execute_tool(
+                self.db, "fm27_lab_run_ab_test",
+                {"tactic_a_kind": "save", "tactic_b_kind": "local_fmf", "tactic_b_ref": "FastPress.fmf",
+                 "mode": "league", "wait": True},
+                default_club="Milan",
+                on_progress=progress_log.append,
+            )
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["result"]["verified_matches"], 4)
+            self.assertIn("FastPress.fmf", res["result"]["winner"])
+            self.assertTrue(any("Match Lab" in m for m in progress_log))
+
+            # Multi-tactic ranking tournament
+            rank_res = fmtools.execute_tool(
+                self.db, "fm27_lab_compare_tactics",
+                {"tactics": [
+                    {"kind": "save", "ref": "0"},
+                    {"kind": "local_fmf", "ref": "Slow.fmf"},
+                    {"kind": "local_fmf", "ref": "FastPress.fmf"},
+                ], "mode": "league"},
+                default_club="Milan",
+            )
+            self.assertTrue(rank_res["ok"])
+            self.assertEqual(len(rank_res["ranking"]), 3)
+            self.assertEqual(rank_res["best_tactic"]["tactic_name"], "FastPress.fmf")
+
+            # Custom native tactic builder tool
+            created = fmtools.execute_tool(
+                self.db, "fm27_lab_create_tactic",
+                {"name": "Milan 4231 Press", "formation": "4-2-3-1", "mentality": "Balanced",
+                 "instructions": {"PressingTrap": "Standard", "Tempo": "Higher"}},
+                default_club="Milan",
+            )
+            self.assertTrue(created["ok"])
+            self.assertEqual(created["filename"], "Milan 4231 Press.fmf")
+
+            # 2) Pure-stdlib MCP server JSON-RPC 2.0 round-trip
+            mcp = fm27_mcp_server.FM27McpServer(db=self.db, lab=fake_lab)
+            init_r = mcp.handle_message({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2024-11-05"},
+            })
+            self.assertEqual(init_r["result"]["serverInfo"]["name"], "fm27-studio")
+            list_r = mcp.handle_message({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+            mcp_names = {t["name"] for t in list_r["result"]["tools"]}
+            self.assertIn("fm27_lab_run_ab_test", mcp_names)
+            self.assertIn("fm27_lab_compare_tactics", mcp_names)
+            self.assertIn("fm27_lab_list_local", mcp_names)
+            call_r = mcp.handle_message({
+                "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": {"name": "fm27_lab_status", "arguments": {}},
+            })
+            self.assertFalse(call_r["result"]["isError"])
+            parsed = json.loads(call_r["result"]["content"][0]["text"])
+            self.assertTrue(parsed["can_simulate"])
+        finally:
+            fmtools.set_lab_client(orig_lab)
+
+    def test_club_squad_includes_loaned_in_rating_value_and_positional_sort(self) -> None:
+        """Club squad includes loaned-in players (e.g. Hutchinson), loan status tags, rating, value & tactical pos_rank."""
+        code, club = _http_json(f"{self.base}/api/club/Milan", token=self.token)
+        self.assertEqual(code, 200)
+        squad = club["squad"]
+        by_uid = {p["unique_id"]: p for p in squad}
+
+        # 1) Loaned-in player Omari Elijah Giraud-Hutchinson is present & tagged loan_status='in'
+        self.assertIn(2000047221, by_uid)
+        hutch = by_uid[2000047221]
+        self.assertEqual(hutch["loan_status"], "in")
+        self.assertEqual(hutch["loan_from"], "Nottm Forest")
+        self.assertGreater(club["loan_in_count"], 0)
+
+        # 2) Loaned-out Milan player (Nkunku) is tagged loan_status='out'
+        self.assertIn(85140301, by_uid)
+        nkunku = by_uid[85140301]
+        self.assertEqual(nkunku["loan_status"], "out")
+        self.assertEqual(nkunku["loan_to"], "RB Leipzig")
+        self.assertGreater(club["loan_out_count"], 0)
+
+        # 3) Every squad player has computed rating & asking value
+        maignan = by_uid[85094520]
+        pulisic = by_uid[92074020]
+        self.assertIsNotNone(maignan["rating"])
+        self.assertGreater(maignan["rating"], 50.0)
+        self.assertGreater(pulisic["value_raw"], 0)
+        self.assertNotEqual(pulisic["value"], "—")
+
+        # 4) Positional sort rank follows GK < CB < FB/WB < DM < CM < Winger < AM < ST
+        from fmrte.studio_api import _position_sort_rank
+        gk_r = _position_sort_rank({"goalkeeper": 20})
+        cb_r = _position_sort_rank({"defender_central": 20})
+        fb_r = _position_sort_rank({"defender_left": 20})
+        dm_r = _position_sort_rank({"defensive_midfielder": 20})
+        cm_r = _position_sort_rank({"midfielder_central": 20})
+        wg_r = _position_sort_rank({"attacking_midfielder_right": 20})
+        am_r = _position_sort_rank({"attacking_midfielder_central": 20})
+        st_r = _position_sort_rank({"striker": 20})
+        self.assertLess(gk_r, cb_r)
+        self.assertLess(cb_r, fb_r)
+        self.assertLess(fb_r, dm_r)
+        self.assertLess(dm_r, cm_r)
+        self.assertLess(cm_r, wg_r)
+        self.assertLess(wg_r, am_r)
+        self.assertLess(am_r, st_r)
+
+        # 5) AI lineup/squad analysis also includes loaned-in Hutchinson as AVAILABLE
+        from fmrte import fmroles, fmsquad
+        ai_rows = fmsquad.squad_rows(self.db, "Milan", 300)
+        ai_hutch = next((r for r in ai_rows if r["unique_id"] == 2000047221), None)
+        self.assertIsNotNone(ai_hutch)
+        self.assertIsNone(fmroles.unavailable_reason(ai_hutch))
+
+    def test_chat_sessions_persistence_and_staff_attributes_editing(self) -> None:
+        """Multi-session chat history (create/select/delete/persist) & Staff attributes + editing."""
+        import os
+        import tempfile
+
+        # 1) Isolated chat session store: create, append, switch, reload from disk, delete
+        with tempfile.TemporaryDirectory(prefix="fm27_chat_") as tmp:
+            store_path = os.path.join(tmp, "chat_sessions.json")
+            orig_store = self.backend.chat_store
+            try:
+                from fmrte.studio_api import _ChatSessionStore
+                self.backend.chat_store = _ChatSessionStore(store_path)
+                self.backend.chat_store.append_turns(
+                    {"role": "user", "text": "Analyze Milan"},
+                    {"role": "assistant", "text": "Milan looks strong.", "steps": [], "tools": []},
+                )
+                first_id = self.backend.chat_store.active_id
+
+                code, created = _http_json(
+                    f"{self.base}/api/ai/sessions", method="POST", token=self.token,
+                    body={"action": "new"},
+                )
+                self.assertEqual(code, 200)
+                self.assertTrue(created["ok"])
+                second_id = created["active_id"]
+                self.assertNotEqual(first_id, second_id)
+                self.assertEqual(len(created["sessions"]), 2)
+                self.assertEqual(len(created["active"]["turns"]), 0)
+
+                # Switch back to first session -> restores turns
+                code, switched = _http_json(
+                    f"{self.base}/api/ai/sessions", method="POST", token=self.token,
+                    body={"action": "select", "id": first_id},
+                )
+                self.assertEqual(code, 200)
+                self.assertEqual(switched["active_id"], first_id)
+                self.assertEqual(len(switched["active"]["turns"]), 2)
+
+                # Reload from disk proves persistence across restarts
+                reloaded = _ChatSessionStore(store_path)
+                self.assertEqual(len(reloaded.sessions), 2)
+                self.assertEqual(reloaded.active_id, first_id)
+
+                # Delete first session -> switches cleanly to remaining session
+                code, deleted = _http_json(
+                    f"{self.base}/api/ai/sessions", method="POST", token=self.token,
+                    body={"action": "delete", "id": first_id},
+                )
+                self.assertEqual(code, 200)
+                self.assertEqual(deleted["active_id"], second_id)
+                self.assertEqual(len(deleted["sessions"]), 1)
+            finally:
+                self.backend.chat_store = orig_store
+
+        # 2) Staff detail exposes structured attribute groups and supports editing + preset
+        code, s = _http_json(f"{self.base}/api/staff/1403539", token=self.token)
+        self.assertEqual(code, 200)
+        self.assertIn("Coaching", s["attributes"])
+        self.assertIn("Mental", s["attributes"])
+        self.assertIn("Scouting & Medical", s["attributes"])
+        self.assertIn("Goalkeeping", s["attributes"])
+        self.assertIn("Personality", s["attributes"])
+
+        code, ed = _http_json(
+            f"{self.base}/api/staff/1403539/edit", method="POST", token=self.token,
+            body={"column": "ca", "value": 188},
+        )
+        self.assertEqual(code, 200)
+        self.assertTrue(ed["ok"])
+        self.assertEqual(ed["staff"]["ca"], 188)
+
+        code, ed_attr = _http_json(
+            f"{self.base}/api/staff/1403539/edit", method="POST", token=self.token,
+            body={"column": "physiotherapy", "value": 20},
+        )
+        self.assertEqual(code, 200)
+        self.assertTrue(ed_attr["ok"])
+        med = ed_attr["staff"]["attributes"]["Scouting & Medical"]
+        phys = next(a for a in med if a["column"] == "physiotherapy")
+        self.assertEqual(phys["value"], 20)
+
+        code, pre = _http_json(
+            f"{self.base}/api/staff/1403539/preset", method="POST", token=self.token,
+            body={"preset": "max_staff"},
+        )
+        self.assertEqual(code, 200)
+        self.assertTrue(pre["ok"])
+        self.assertEqual(pre["staff"]["pa"], 200)
+
+    def test_people_index_o1_lookup_and_club_nation_logo_avatars(self) -> None:
+        """FmMemory.find_person caches UID->ptr in O(1), and club/nation logos serve via /api/avatar."""
+        import os
+        import struct
+        import tempfile
+        from fmrte import fmmemory as FM
+        from fmrte.procmem import InMemoryProcessMemory
+        from fmrte.studio_api import _FaceResolver
+
+        # 1) O(1) find_person cache + stale-pointer auto-rebuild
+        mem = InMemoryProcessMemory(pid=1, module_base=0x100000, module_size=0x100000)
+        p1, p2, p3 = 0x200000, 0x201000, 0x202000
+        mem.put(p1 + FM.REL_UNIQUE_ID, struct.pack("<I", 1001))
+        mem.put(p2 + FM.REL_UNIQUE_ID, struct.pack("<I", 1002))
+        mem.put(p3 + FM.REL_UNIQUE_ID, struct.pack("<I", 1003))
+        fm = FM.FmMemory(mem)
+        scan_calls = [0]
+        ptrs = [p1, p2]
+
+        def fake_ptrs():
+            scan_calls[0] += 1
+            return list(ptrs)
+
+        fm.people_pointers = fake_ptrs  # type: ignore[method-assign]
+        self.assertEqual(fm.find_person(1001), p1)
+        self.assertEqual(fm.find_person(1002), p2)
+        self.assertIsNone(fm.find_person(9999))
+        self.assertEqual(scan_calls[0], 1, "Second lookup must hit O(1) index without rescanning vector")
+
+        # Simulate save reload moving 1002 from p2 to p3
+        mem.put(p2 + FM.REL_UNIQUE_ID, struct.pack("<I", 0))
+        mem.put(p3 + FM.REL_UNIQUE_ID, struct.pack("<I", 1002))
+        ptrs[:] = [p1, p3]
+        self.assertEqual(fm.find_person(1002), p3)
+        self.assertEqual(scan_calls[0], 2, "Stale pointer must trigger exactly one index rebuild")
+
+        # 2) Club & nation logo resolution via TCM-style config.xml + /api/avatar endpoints
+        tiny_png = (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+            b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01"
+            b"\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+        with tempfile.TemporaryDirectory(prefix="fm27_gfx_") as tmp:
+            club_dir = os.path.join(tmp, "Europe", "Italy", "Clubs")
+            nat_dir = os.path.join(tmp, "Others", "Federations")
+            os.makedirs(club_dir, exist_ok=True)
+            os.makedirs(nat_dir, exist_ok=True)
+            with open(os.path.join(club_dir, "TCM1_1099.png"), "wb") as f:
+                f.write(tiny_png)
+            with open(os.path.join(club_dir, "config.xml"), "w", encoding="utf-8") as f:
+                f.write('<record><list id="maps"><record from="TCM1_1099" to="graphics/pictures/club/1099/logo"/></list></record>')
+            with open(os.path.join(nat_dir, "TCM4_776.png"), "wb") as f:
+                f.write(tiny_png)
+            with open(os.path.join(nat_dir, "config.xml"), "w", encoding="utf-8") as f:
+                f.write('<record><list id="maps"><record from="TCM4_776" to="graphics/pictures/nation/776/logo"/></list></record>')
+
+            orig_faces = self.backend.faces
+            try:
+                resolver = _FaceResolver(tmp)
+                resolver._club_uids["milan"] = 1099
+                resolver._nation_uids["意大利"] = 776
+                self.backend.faces = resolver
+
+                milan = self.db.club_by_name("Milan")
+                self.assertIsNotNone(milan)
+                for path_part in (
+                    f"club/{milan['id']}",
+                    "club/AC%20Milan",
+                    f"nation/{urllib.parse.quote('意大利')}",
+                ):
+                    with urllib.request.urlopen(
+                        f"{self.base}/api/avatar/{path_part}?token={self.token}", timeout=5
+                    ) as resp:
+                        self.assertEqual(resp.status, 200, path_part)
+                        self.assertTrue(resp.headers.get("Content-Type", "").startswith("image/"))
+                        self.assertEqual(resp.read(), tiny_png)
+            finally:
+                self.backend.faces = orig_faces
+
+    def test_live_injury_vector_and_full_live_overlay_for_ui_and_ai(self) -> None:
+        """Empty FM27 injury vector reads as fit; live injuries/contracts/loans/budgets flow to UI & AI."""
+        import struct
+        from fmrte import fmmemory as FM, fmtools, memmap as M
+        from fmrte.procmem import InMemoryProcessMemory
+
+        # 1) read_injury: empty std::vector (begin == end) -> fit; non-empty vector -> active injury
+        mem = InMemoryProcessMemory(pid=1, module_base=0x100000, module_size=0x100000)
+        fm = FM.FmMemory(mem)
+        # Empty vector (recovered player like Pulisic/Modric)
+        empty_ref = 0x300000
+        mem.put(empty_ref, struct.pack("<QQQ", 0x310000, 0x310000, 0x310008))
+        self.assertFalse(fm.read_injury(empty_ref).injured)
+
+        # Active vector: begin -> [item_ptr], end = begin + 8, indirect UTF-8 injury name
+        act_ref = 0x320000
+        vec_buf = 0x330000
+        item_addr = 0x340000
+        type_addr = 0x350000
+        str_addr = 0x360000
+        mem.put(act_ref, struct.pack("<QQQ", vec_buf, vec_buf + 8, vec_buf + 8))
+        mem.put(vec_buf, struct.pack("<Q", item_addr))
+        item = bytearray(0x40)
+        struct.pack_into("<Q", item, M.INJURY_TYPE_REL, type_addr)
+        struct.pack_into("<HH", item, M.INJURY_DAY_REL, 360, 2026)  # 2026-12-26
+        struct.pack_into("<HH", item, M.INJURY_FULL_TRAINING_REL, 16, 4)
+        mem.put(item_addr, bytes(item))
+        mem.put(type_addr + M.INJURY_TYPE_NAME_REL, struct.pack("<Q", str_addr))
+        name_bytes = "腹股沟拉伤".encode("utf-8")
+        mem.put(str_addr, struct.pack("<i", len(name_bytes)) + name_bytes + b"\x00")
+        inj = fm.read_injury(act_ref)
+        self.assertTrue(inj.injured)
+        self.assertEqual(inj.name, "腹股沟拉伤")
+        self.assertEqual(inj.start_date, "2026-12-26")
+        self.assertEqual(inj.light_training_days, 4)
+        self.assertEqual(inj.full_training_days, 16)
+
+        # 2) Full live overlay (recovered Pulisic + renewed contract, loaned Gusto, Milan budget)
+        orig_live = dict(self.db.live)
+        orig_club_live = dict(self.db.club_live)
+        try:
+            self.db.apply_live(
+                [
+                    FM.LivePlayer(
+                        unique_id=92074020, ca=158, pa=158,
+                        condition=10000, sharpness=8653, jadedness=0, morale=90,
+                        home_reputation=8000, current_reputation=8000, world_reputation=8000,
+                        contract_end_date="2031-06-30",
+                        injured=0, injury="", injury_start_date="",
+                        injury_light_training_days_remaining="",
+                        injury_full_training_days_remaining="",
+                        injury_expected_return="",
+                    ),
+                    FM.LivePlayer(
+                        unique_id=49056280, ca=145, pa=155,
+                        condition=9800, sharpness=9000, jadedness=0, morale=85,
+                        home_reputation=7000, current_reputation=7000, world_reputation=7000,
+                        club="Chelsea", playing_club="West Ham", loan_club="West Ham",
+                        is_loaned_out="yes", listed_for_loan=0,
+                    ),
+                ],
+                club_finances={
+                    "milan": {"balance": 35638667, "transfer_budget": 67942576, "payroll_budget": 2229752},
+                },
+            )
+            # Pulisic is fit and renewed in both Search API and AI tools
+            code, srch = _http_json(f"{self.base}/api/search?scope=players&q=Pulisic&limit=5", token=self.token)
+            self.assertEqual(code, 200)
+            pul = next(r for r in srch["rows"] if r["unique_id"] == 92074020)
+            self.assertFalse(pul["injured"])
+            self.assertEqual(pul["contract_iso"], "2031-06-30")
+
+            # AI club_context & player_detail see live Milan budget, fit Pulisic, loaned Gusto
+            ctx = fmtools.club_context(self.db, "Milan", squad_limit=40)
+            self.assertEqual(ctx["balance"], 35638667)
+            self.assertEqual(ctx["transfer_budget"], 67942576)
+            g_det = fmtools.player_detail(self.db, 49056280)
+            self.assertTrue(g_det["is_loaned_out"])
+            self.assertEqual(g_det["loan_club"], "West Ham")
+            self.assertFalse(g_det["listed_for_loan"])
+            sq = fmtools.analyze_squad(self.db, "Milan")
+            self.assertNotIn("Christian Mate Pulisic", sq["injured"])
+        finally:
+            self.db.live.clear()
+            self.db.live.update(orig_live)
+            self.db.club_live.clear()
+            self.db.club_live.update(orig_club_live)
+
 
 if __name__ == "__main__":
     unittest.main()

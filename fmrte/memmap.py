@@ -79,6 +79,52 @@ DIRECT_POSITIVE_FIELDS: dict[str, tuple[int, str]] = {
     "controversy": (119, "<B"),
 }
 
+# -- staff (NonPlayer, SUBTYPE_STAFF = 256) fields --------------------------
+# Verified live against FM27 (build 2511875) across 15+ specialist staff roles.
+# Staff CA/PA/reputation sit 2 bytes earlier than plain players; the 26-byte
+# coaching/mental/medical/scouting block sits at person - 214..person - 189
+# (stored 0..100, shown 1..20 via the same ATTRIBUTE_STORAGE_SCALE rule).
+STAFF_DIRECT_FIELDS: dict[str, tuple[int, str]] = {
+    "home_reputation": (-44, "<H"),
+    "current_reputation": (-42, "<H"),
+    "world_reputation": (-40, "<H"),
+    "ca": (-38, "<h"),
+    "pa": (-36, "<h"),
+}
+
+STAFF_ATTRIBUTE_BLOCK_REL = -214
+STAFF_ATTRIBUTE_BLOCK_LEN = 26
+
+STAFF_ATTRIBUTE_OFFSETS: dict[str, int] = {
+    # Coaching
+    "attacking": -206,
+    "defending": -205,
+    "fitness": -204,
+    "mental": -203,
+    "technical": -202,
+    "tactical": -201,
+    "working_with_youngsters": -190,
+    "set_pieces": -189,
+    # Goalkeeping
+    "gk_shot_stopping": -213,
+    "gk_distribution": -199,
+    "gk_handling": -198,
+    # Mental
+    "man_management": -210,
+    "determination": -209,
+    "motivating": -214,
+    "level_of_discipline": -192,
+    "tactical_knowledge": -207,
+    # Scouting & Medical
+    "judging_player_ability": -212,
+    "judging_player_potential": -211,
+    "judging_staff_ability": -191,
+    "negotiating": -200,
+    "physiotherapy": -208,
+    "sports_science": -193,
+    "analysing_data": -194,
+}
+
 # -- attribute block --------------------------------------------------------
 ATTRIBUTE_BLOCK_REL = -314
 ATTRIBUTE_INDEX_BASE = 40
@@ -194,12 +240,23 @@ INJURY_YEAR_REL = 0x22
 INJURY_FULL_TRAINING_REL = 0x28
 INJURY_LIGHT_TRAINING_REL = 0x2A
 
-# -- registration (contract) ------------------------------------------------
+# -- registration (contract) & club/loan ------------------------------------
+PLAYING_CLUB_REF_REL = -344
 REGISTRATION_POINTER_REL = 168
+REGISTRATION_CLUB_REL = 16
+TEAM_CLUB_REL = 48
 SALARY_WEEKLY_REL = 32
 CONTRACT_DATE_REL = 72
 JOINED_DATE_REL = 76
 TRANSFER_STATUS_REL = 87
+
+# -- club finance block (ClubRecordLayout / ClubFinanceLayout) --------------
+CLUB_FINANCE_BLOCK_REL = 336
+CLUB_BALANCE_REL = 12
+CLUB_TRANSFER_BUDGET_REL = 1988
+CLUB_PAYROLL_BUDGET_REL = 2056
+CLUB_FINANCE_FULL_VTABLE_DELTA = 0x4D0
+CLUB_FINANCE_FULL_BYTES = 2076
 
 # Dates are two u16: the day of the year (1..366, masked with 511) and the year.
 DATE_DAY_MASK = 511

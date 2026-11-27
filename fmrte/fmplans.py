@@ -576,51 +576,129 @@ def training_activities() -> dict[str, Any]:
 
 
 def training_week(focus: str, name: str = "",
-                  match_day: str = "") -> dict[str, Any]:
-    """A seven-day, three-session week that matches the focus."""
-    lowered = (focus or "").lower()
-    if "recover" in lowered or "rest" in lowered or "tired" in lowered:
-        week = [[301, 300, 300], [301, 300, 300], [301, 300, 300],
-                [301, 300, 300], [301, 300, 300], [300, 300, 300],
-                [300, 300, 300]]
-        notes = ["Recovery days use 301; rest days use 300.",
-                 "No tactical work, so sharpness falls slowly rather than fast."]
-    elif "press" in lowered or "defens" in lowered:
-        # Aligned with Match Lab S24: prioritize proven high-impact areas
-        # (Chance creation 2, Pressing intensity 5, Out-of-possession shape 7)
-        # instead of Engagement line (4) / Pressing traps (6) which measured no effect.
-        week = [[5, 7, 2], [5, 7, 301], [2, 5, 7], [5, 7, 301],
-                [102, 2, 301], [101, 102, 301], [300, 300, 300]]
-        notes = ["Pressing intensity (5), out-of-possession shape (7) and chance "
-                 "creation (2) are the three familiarity areas with measured point gains (S24).",
-                 "Engagement line (4) and pressing traps (6) are omitted because "
-                 "paired testing measured no effect from training them.",
-                 "Familiarity gains saturate near 50 — rotate to recovery (301) or "
-                 "match prep (101/102) once those areas are built."]
-    elif "attack" in lowered or "chance" in lowered or "final third" in lowered:
-        week = [[2, 102, 201], [1, 2, 301], [2, 102, 203], [1, 2, 301],
-                [102, 201, 203], [101, 102, 301], [300, 300, 300]]
-        notes = ["Chance creation (2) and final third (102) are the attacking "
-                 "sessions.",
-                 "Ball feel (201/203) keeps the technical work in the week."]
-    elif "ball" in lowered or "technical" in lowered or "control" in lowered:
-        week = [[203, 201, 202], [203, 201, 301], [203, 202, 201],
-                [203, 201, 301], [201, 202, 203], [203, 201, 301],
-                [300, 300, 300]]
-        notes = ["Ball control (203) is the base session; ball feel (201/202) "
-                 "sits on top of it."]
-    elif "bond" in lowered or "morale" in lowered or "team" in lowered:
-        week = [[400, 3, 301], [400, 7, 301], [3, 4, 301], [400, 3, 301],
-                [7, 4, 301], [400, 301, 300], [300, 300, 300]]
-        notes = ["Team bonding (400) is the extra-activities session.",
-                 "Shape sessions (3/7) keep the tactical work while morale "
-                 "recovers."]
+                  match_day: str = "",
+                  days: Sequence[Sequence[int]] | None = None) -> dict[str, Any]:
+    """A seven-day, three-session week from custom ``days`` or a focus preset."""
+    notes: list[str] = []
+    if days is not None:
+        if not isinstance(days, (list, tuple)) or len(days) != len(DAYS):
+            return {
+                "error": (
+                    f"days must be a list of {len(DAYS)} days (Monday..Sunday), "
+                    f"each containing {SESSIONS_PER_DAY} measured FM27 activity IDs."
+                ),
+            }
+        week: list[list[int]] = []
+        warned_s24: set[int] = set()
+        for day_idx, raw_day in enumerate(days):
+            if not isinstance(raw_day, (list, tuple)) or len(raw_day) != SESSIONS_PER_DAY:
+                return {
+                    "error": (
+                        f"{DAYS[day_idx]} must contain exactly {SESSIONS_PER_DAY} "
+                        "activity IDs."
+                    ),
+                }
+            parsed_day: list[int] = []
+            for raw_id in raw_day:
+                aid: int | None = None
+                if isinstance(raw_id, int) and not isinstance(raw_id, bool):
+                    aid = raw_id
+                else:
+                    token = str(raw_id or "").strip()
+                    if token.isdigit():
+                        aid = int(token)
+                    else:
+                        norm = "".join(ch for ch in token.lower() if ch not in " _-")
+                        for cand_id, eng, loc, _grp in TRAINING_ACTIVITIES:
+                            if norm in (
+                                "".join(ch for ch in eng.lower() if ch not in " _-"),
+                                "".join(ch for ch in loc.lower() if ch not in " _-"),
+                            ):
+                                aid = cand_id
+                                break
+                if aid is None:
+                    return {
+                        "error": (
+                            f"Invalid activity id {raw_id!r} on {DAYS[day_idx]}; "
+                            "call fm27_training_activities for valid measured IDs."
+                        ),
+                    }
+                if aid not in ACTIVITY_BY_ID:
+                    return {
+                        "error": (
+                            f"Unknown FM27 activity id {aid} on {DAYS[day_idx]}; "
+                            f"valid IDs are {sorted(ACTIVITY_BY_ID)}."
+                        ),
+                    }
+                if aid in (4, 6):
+                    warned_s24.add(aid)
+                parsed_day.append(aid)
+            week.append(parsed_day)
+        notes.append("Custom 7-day × 3-session schedule built directly from validated FM27 activity IDs.")
+        if 4 in warned_s24:
+            notes.append("Note (S24): Engagement line (4) measured no significant point gain.")
+        if 6 in warned_s24:
+            notes.append("Note (S24/S5): Pressing traps (6) measured no training gain; keep tactic pressing trap on Standard.")
     else:
-        week = [[3, 4, 301], [1, 2, 301], [5, 7, 301], [3, 4, 301],
-                [101, 102, 301], [200, 203, 301], [300, 300, 300]]
-        notes = ["A balanced week: shape, build-up, pressing, then match "
-                 "preparation.",
-                 "The last day is rest (300) before the match."]
+        lowered = (focus or "").lower()
+        if "recover" in lowered or "rest" in lowered or "tired" in lowered:
+            week = [[301, 300, 300], [301, 300, 300], [301, 300, 300],
+                    [301, 300, 300], [301, 300, 300], [300, 300, 300],
+                    [300, 300, 300]]
+            notes = ["Recovery days use 301; rest days use 300.",
+                     "No tactical work, so condition recovers fastest while minimizing fatigue."]
+        elif "tactic" in lowered or "familiar" in lowered:
+            # Pure S24 top-3 familiarity areas: Chance creation (2), Pressing intensity (5), OOP shape (7)
+            week = [[2, 5, 301], [7, 2, 301], [5, 7, 301], [2, 5, 301],
+                    [102, 7, 301], [101, 2, 301], [300, 300, 300]]
+            notes = ["Built strictly on Match Lab S24's three proven familiarity levers: "
+                     "Chance creation (2), Pressing intensity (5), and Out-of-possession shape (7).",
+                     "Engagement line (4), Pressing traps (6), and In-possession shape (3) are omitted "
+                     "because paired testing measured no effect from training them.",
+                     "Familiarity saturates near 50/100 (S3-FAMILIARITY-CAP) — rotate to Recovery (301) "
+                     "and Match prep (101/102) once reached."]
+        elif "press" in lowered or "defens" in lowered:
+            # Aligned with Match Lab S24: prioritize proven high-impact areas
+            # (Chance creation 2, Pressing intensity 5, Out-of-possession shape 7)
+            # instead of Engagement line (4) / Pressing traps (6) which measured no effect.
+            week = [[5, 7, 2], [5, 7, 301], [2, 5, 7], [5, 7, 301],
+                    [102, 2, 301], [101, 102, 301], [300, 300, 300]]
+            notes = ["Pressing intensity (5), out-of-possession shape (7) and chance "
+                     "creation (2) are the three familiarity areas with measured point gains (S24).",
+                     "Engagement line (4) and pressing traps (6) are omitted because "
+                     "paired testing measured no effect from training them.",
+                     "Familiarity gains saturate near 50 — rotate to recovery (301) or "
+                     "match prep (101/102) once those areas are built."]
+        elif "attack" in lowered or "chance" in lowered or "final third" in lowered:
+            week = [[2, 102, 201], [1, 2, 301], [2, 102, 203], [1, 2, 301],
+                    [102, 201, 203], [101, 102, 301], [300, 300, 300]]
+            notes = ["Chance creation (2) and final third (102) are the attacking "
+                     "sessions.",
+                     "Ball feel (201/203) keeps the technical work in the week."]
+        elif "ball" in lowered or "technical" in lowered or "control" in lowered:
+            week = [[203, 201, 202], [203, 201, 301], [203, 202, 201],
+                    [203, 201, 301], [201, 202, 203], [203, 201, 301],
+                    [300, 300, 300]]
+            notes = ["Ball control (203) is the base session; ball feel (201/202) "
+                     "sits on top of it."]
+        elif "phys" in lowered or "sharp" in lowered or "fit" in lowered or "match" in lowered:
+            week = [[301, 300, 300], [5, 301, 300], [2, 7, 301], [301, 300, 300],
+                    [102, 2, 301], [101, 301, 300], [300, 300, 300]]
+            notes = ["Sharpness & condition protection week (S5-SHARPNESS-FIRST / S5-CONDITION-SECOND).",
+                     "Heavy recovery (301) & rest (300) preserves condition while match minutes rebuild sharpness.",
+                     "Keeps light high-value tactical sessions (2, 5, 7) and match prep (101/102)."]
+        elif "bond" in lowered or "morale" in lowered or "team" in lowered:
+            week = [[400, 2, 301], [400, 7, 301], [5, 7, 301], [400, 2, 301],
+                    [102, 7, 301], [400, 301, 300], [300, 300, 300]]
+            notes = ["Team bonding (400) lifts morale and cohesion.",
+                     "Paired with S24 high-value familiarity sessions (2, 5, 7) and recovery (301)."]
+        else:
+            week = [[2, 5, 301], [1, 7, 301], [5, 2, 301], [7, 203, 301],
+                    [101, 102, 301], [201, 301, 300], [300, 300, 300]]
+            notes = ["S24-aligned balanced week: Chance creation (2), Pressing intensity (5), "
+                     "Out-of-possession shape (7), match prep (101/102), and daily recovery (301).",
+                     "Omits no-effect Engagement line (4) and Pressing traps (6) (S24).",
+                     "Sunday is full rest (300) to protect condition and sharpness."]
 
     if match_day:
         wanted = match_day.strip().lower()
@@ -641,7 +719,7 @@ def training_week(focus: str, name: str = "",
             ],
         })
     plan_name = name.strip() or f"{focus or 'Balanced'} week"
-    plan_focus = focus or "Balanced"
+    plan_focus = focus or ("Custom" if days is not None else "Balanced")
     return {
         "name": plan_name,
         "focus": plan_focus,
@@ -649,8 +727,10 @@ def training_week(focus: str, name: str = "",
         "notes": notes,
         "sheet": training_sheet(plan_name, plan_focus, week, notes),
         "writes_game": False,
+        "exports_fmf": False,
         "guidance": (
             "Every identifier is one FM27 measures. Tactical familiarity is the "
-            "lever the evidence supports: tactical sessions build it, rest days "
-            "protect sharpness."),
+            "lever the evidence supports: Chance creation (2), Pressing intensity (5), "
+            "and Out-of-possession shape (7) build it up to ~50/100; rest (300) and "
+            "recovery (301) protect condition while match minutes rebuild sharpness."),
     }

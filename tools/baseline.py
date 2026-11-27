@@ -1,8 +1,7 @@
 """Record and check a version baseline for this project.
 
-The project lives in OneDrive without git, so "roll back to the last good
-version" needs a manifest of what that version was. This tool writes one and
-checks the working tree against it.
+"Roll back to the last good version" needs a manifest of what that version was.
+This tool writes one and checks the working tree against it.
 
     python tools/baseline.py --write      record the current tree as the baseline
     python tools/baseline.py              check the tree against the baseline
@@ -12,8 +11,15 @@ Exit code 0 means every recorded file is present and unchanged (new files that
 are not recorded are reported as additions but do not fail the check). Exit
 code 1 means a recorded file changed or disappeared.
 
-What is recorded: source, tests, data files, docs and mechanics.json. What is
-not: .venv, __pycache__, shots, and anything bigger than MAX_BYTES.
+What is recorded: the files git tracks - source, tests, data files, docs and
+mechanics.json. Outside a git checkout it falls back to walking the tree and
+applies the same directory/suffix filters by hand. What is not recorded:
+.venv, __pycache__, shots, versions/, local saves, reverse-engineering scratch,
+and anything bigger than MAX_BYTES.
+
+Being git-driven is what keeps the baseline stable: a scratch file dropped next
+to the source (a Ghidra dump, a probe script, a CSV export git already ignores)
+must not show up as drift, and a fresh clone must reproduce the same file set.
 """
 
 from __future__ import annotations
@@ -21,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import sys
 
 APP = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -44,18 +51,56 @@ def digest(path: str) -> str:
     return sha.hexdigest()
 
 
+def _kept(rel: str) -> bool:
+    """Whether a forward-slash relative path belongs in the baseline."""
+    parts = rel.split("/")
+    if any(part in SKIP_DIRS for part in parts[:-1]):
+        return False
+    return os.path.splitext(parts[-1])[1].lower() not in SKIP_SUFFIXES
+
+
+def tracked() -> list[str]:
+    """The files git tracks, or an empty list outside a checkout.
+
+    Falls back to an empty list on any failure (git missing, not a repository,
+    a broken index), in which case the caller walks the tree instead.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", APP, "ls-files", "-z"],
+            capture_output=True, check=True,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    names = [n for n in out.decode("utf-8", "surrogateescape").split("\0") if n]
+    return sorted(n for n in names if _kept(n))
+
+
 def walk() -> dict[str, str]:
     found: dict[str, str] = {}
+    names = tracked()
+    if names:
+        for rel in names:
+            path = os.path.join(APP, *rel.split("/"))
+            try:
+                if os.path.getsize(path) > MAX_BYTES:
+                    continue
+                found[rel] = digest(path)
+            except OSError:
+                # Tracked but not checked out (or unreadable): reporting it as
+                # missing is the honest answer, so leave it out of the tree.
+                continue
+        return found
     for root, dirs, files in os.walk(APP):
         dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
         for name in sorted(files):
             path = os.path.join(root, name)
-            if os.path.splitext(name)[1].lower() in SKIP_SUFFIXES:
+            rel = os.path.relpath(path, APP).replace("\\", "/")
+            if not _kept(rel):
                 continue
             try:
                 if os.path.getsize(path) > MAX_BYTES:
                     continue
-                rel = os.path.relpath(path, APP).replace("\\", "/")
                 found[rel] = digest(path)
             except OSError:
                 continue

@@ -21,10 +21,10 @@ A pure-Python 3.12 (zero third-party dependency) desktop studio for **Football M
   - Built-in providers: **Command Code**, **DeepSeek (Official API)**, **OpenCode Go**, **OpenRouter**, **OpenAI-compatible**, **Google Gemini**, **Claude Code CLI**, **Codex CLI**, **Antigravity CLI**, and **GitHub Copilot CLI**
   - One-click **Fetch Models** (`/models`) directly inside Settings or the chat composer
   - API keys encrypted locally via Windows DPAPI (`~/.fmrte-assistant/provider.key`) — never stored in the repository.
-- **Native FM27 Tactics Lab Integration (`Lab` Tab + AI Tools)**:
+- **Native FM27 Tactics Lab Integration (`Lab` Tab + Direct AI Execution + MCP Server)**:
   - Connects to local **[FM27 Tactics Lab](https://github.com/seva324/fm-tactics-lab)** via stdio (`desktop_server.py --stdio`) to run real native FM27 match-engine league and A/B simulations
-  - Load your current `.fm` save onto the tactics board, discover real league opponents, and compare **Tactic A vs Tactic B** from your save, local `.fmf` files, or online **FM-Arena** tactics
-  - Reports honest native match verification (`verified_matches`, `validation_scope`, PPG, W-D-L, GD, xGD, and winner)
+  - **Built-in AI Assistant directly executes tests**: ask the AI in chat (or type `/lab`) to A/B test or benchmark 2–5 tactics from your save, local `.fmf` files, or online **FM-Arena** tactics — it automatically imports your `.fm` save, streams live match progress in the chat panel, and reports verified results (`verified_matches`, `validation_scope`, PPG, W-D-L, GD, xGD, and winner)
+  - **Zero-Dependency MCP Server (`fm27_mcp_server.py`)**: exposes the full FM27 Studio + Tactics Lab toolset over standard MCP JSON-RPC 2.0 stdio for external AI clients (Claude Desktop, Claude Code, Cursor, Antigravity) using an isolated `tactics-lab-mcp` data directory so it never conflicts with a running Studio window
   - If FM27 Tactics Lab is not installed locally, Studio prompts with a one-click option to download it from [`seva324/fm-tactics-lab`](https://github.com/seva324/fm-tactics-lab).
 - **Clean Save & Reload Cache Management**: Temporary reload staging folders live strictly inside `saves/reloads/` and are pruned automatically on startup, on save, and periodically in the background.
 
@@ -47,6 +47,21 @@ python -S main.py
 | `Ctrl + Z` | Undo last edit |
 | `Ctrl + Y` / `Ctrl + Shift + Z` | Redo |
 | `/` (in AI Chat) | Open AI Command Palette |
+
+## MCP Server Setup (Claude Desktop / Claude Code / Cursor / Antigravity)
+
+You can connect external MCP-compatible AI assistants directly to FM27 Studio + Tactics Lab:
+
+```json
+{
+  "mcpServers": {
+    "fm27-studio": {
+      "command": "python",
+      "args": ["-S", "/path/to/fm27-studio/fm27_mcp_server.py"]
+    }
+  }
+}
+```
 
 ## Running Tests
 

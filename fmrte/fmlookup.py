@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import ratings as R
+from . import staffratings as SR
 from .fmroles import (LABEL_POSITIONS, LABEL_TO_GENERAL, as_int, attr_value,
                       condition_percent, position_score, position_text,
                       role_display, role_fit, sharpness_percent, short_label)
@@ -88,6 +89,9 @@ def search_players(db: Any, query: str = "", club: str = "",
                 "player_unique_id": as_int(player.get("unique_id"), 0),
                 "player_name": player.get("name"),
                 "club": player.get("club"),
+                "playing_club": player.get("playing_club"),
+                "loan_club": player.get("loan_club") or None,
+                "is_loaned_out": str(player.get("is_loaned_out") or "").lower() in ("yes", "1", "true"),
                 "age": as_int(player.get("age"), 0),
                 "nationality": player.get("nationality"),
                 "position": position_text(player),
@@ -121,6 +125,9 @@ def player_detail(db: Any, unique_id: int) -> dict[str, Any]:
         "player_unique_id": as_int(player.get("unique_id"), 0),
         "name": player.get("name"),
         "club": player.get("club"),
+        "playing_club": player.get("playing_club"),
+        "loan_club": player.get("loan_club") or None,
+        "is_loaned_out": str(player.get("is_loaned_out") or "").lower() in ("yes", "1", "true"),
         "age": as_int(player.get("age"), 0),
         "nationality": player.get("nationality"),
         "height_cm": as_int(player.get("height_cm"), 0),
@@ -179,6 +186,108 @@ def find_clubs(db: Any, name: str = "", nation: str = "",
         })
     out.sort(key=lambda row: -as_int(row.get("reputation"), 0))
     return {"count": min(cap, len(out)), "clubs": out[:cap]}
+
+
+def search_staff(db: Any, query: str = "", club: str = "", job: str = "",
+                 role_category: str = "",
+                 min_ca: int | None = None, max_ca: int | None = None,
+                 min_pa: int | None = None, max_pa: int | None = None,
+                 min_stars: float | None = None,
+                 limit: int = 60) -> dict[str, Any]:
+    """Search club or global staff with live FM coaching/specialist star ratings."""
+    cap = max(1, min(150, int(limit or 60)))
+    scan_cap = max(cap, 300)
+    club_val = (club or "").strip() or None
+    job_val = (job or "").strip() or None
+    if job_val and job_val.lower() == "any":
+        job_val = None
+    cat_val = (role_category or "").strip().lower()
+    if cat_val and cat_val not in SR.CATEGORY_BY_KEY:
+        cat_val = ""
+
+    raw_rows: list[dict[str, Any]] = []
+    try:
+        if hasattr(db, "query_staff"):
+            raw_rows = [dict(r) for r in db.query_staff(
+                query=(query or "").strip(),
+                club=club_val,
+                job=job_val,
+                min_ca=None if min_ca is None else int(min_ca),
+                max_ca=None if max_ca is None else int(max_ca),
+                min_pa=None if min_pa is None else int(min_pa),
+                max_pa=None if max_pa is None else int(max_pa),
+                limit=scan_cap,
+            ) or []]
+        elif club_val and hasattr(db, "staff"):
+            raw_rows = [dict(r) for r in db.staff(club_val, scan_cap) or []]
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"the staff table could not be queried: {exc}"}
+
+    editor = getattr(db, "editor", None)
+    can_read_live = bool(getattr(db, "attached", False) and editor is not None
+                         and hasattr(editor, "read_staff"))
+    min_st = float(min_stars) if min_stars is not None else None
+
+    evaluated: list[dict[str, Any]] = []
+    live_hits = 0
+    for row in raw_rows:
+        uid = as_int(row.get("unique_id") or row.get("id"), 0)
+        merged = dict(row)
+        if can_read_live and uid > 0:
+            try:
+                rec = editor.read_staff(uid)
+                if rec and rec.values:
+                    merged.update(rec.values)
+                    live_hits += 1
+            except Exception:  # noqa: BLE001
+                pass
+        ev = SR.evaluate_staff(merged, job=str(merged.get("job") or ""),
+                               focus_category=cat_val)
+        if min_st is not None and ev["stars"] < min_st:
+            continue
+        item: dict[str, Any] = {
+            "staff_unique_id": uid,
+            "name": merged.get("name"),
+            "club": merged.get("club") or "Unattached",
+            "job": merged.get("job") or "Staff",
+            "age": as_int(merged.get("age"), 0),
+            "nationality": merged.get("nationality"),
+            "ca": as_int(merged.get("ca"), 0),
+            "pa": as_int(merged.get("pa"), 0),
+            "stars": ev["stars"],
+            "score": ev["score"],
+            "live_stars": ev["live_stars"],
+            "category": ev["category"],
+            "category_label": ev["category_label"],
+            "ddm": ev["ddm"],
+            "key_summary": ev["key_summary"],
+        }
+        if ev["live_stars"]:
+            item["coach_stars"] = ev["coach_stars"]
+            item["role_stars"] = ev["role_stars"]
+        evaluated.append(item)
+
+    if cat_val or min_st is not None:
+        evaluated.sort(key=lambda r: (-float(r["stars"]), -float(r["score"]), -int(r["ca"])))
+    else:
+        evaluated.sort(key=lambda r: (-int(r["ca"]), -float(r["stars"])))
+
+    by_job: dict[str, int] = {}
+    for row in evaluated:
+        j = str(row["job"])
+        by_job[j] = by_job.get(j, 0) + 1
+
+    return {
+        "club": club_val,
+        "job": job_val,
+        "role_category": cat_val or "best",
+        "total_matched": len(evaluated),
+        "count": min(cap, len(evaluated)),
+        "live_attributes_loaded": live_hits,
+        "by_job": by_job,
+        "staff": evaluated[:cap],
+        "available_categories": [c["key"] for c in SR.categories_catalogue()],
+    }
 
 
 def fixtures(db: Any, club_name: str, limit: int = 8) -> dict[str, Any]:

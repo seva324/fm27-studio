@@ -261,6 +261,94 @@ class LiveEditor:
                 record.values["transfer_status"] = head[M.TRANSFER_STATUS_REL]
         return record
 
+    def read_staff(self, unique_id: int) -> LivePlayerRecord | None:
+        """Read a live FM27 staff (NonPlayer) record from the People vector."""
+        address = self.game.find_person(unique_id)
+        if not address:
+            return None
+        raw = self.game.read(address - BLOCK_BEFORE, BLOCK_SIZE)
+        if not raw:
+            return None
+        uid = struct.unpack_from("<I", raw, BLOCK_BEFORE + 12)[0]
+        if uid != unique_id:
+            return None
+        ca = struct.unpack_from("<h", raw, BLOCK_BEFORE + M.STAFF_DIRECT_FIELDS["ca"][0])[0]
+        pa = struct.unpack_from("<h", raw, BLOCK_BEFORE + M.STAFF_DIRECT_FIELDS["pa"][0])[0]
+        attr_start = BLOCK_BEFORE + M.STAFF_ATTRIBUTE_BLOCK_REL
+        attr_slice = raw[attr_start: attr_start + M.STAFF_ATTRIBUTE_BLOCK_LEN]
+        if not (0 <= ca <= 200 and 0 <= pa <= 200 and len(attr_slice) == M.STAFF_ATTRIBUTE_BLOCK_LEN):
+            return None
+        if any(b > 100 for b in attr_slice):
+            return None
+
+        record = LivePlayerRecord(unique_id=unique_id, address=address)
+        for col, (off, fmt) in M.STAFF_DIRECT_FIELDS.items():
+            record.values[col] = struct.unpack_from(fmt, raw, BLOCK_BEFORE + off)[0]
+        for col, (off, fmt) in M.DIRECT_POSITIVE_FIELDS.items():
+            val = struct.unpack_from(fmt, raw, BLOCK_BEFORE + off)[0]
+            if 1 <= val <= spec.ATTRIBUTE_MAX:
+                record.values[col] = val
+        for col, off in M.STAFF_ATTRIBUTE_OFFSETS.items():
+            raw_b = raw[BLOCK_BEFORE + off]
+            record.values[col] = max(1, min(spec.ATTRIBUTE_MAX, round(raw_b * spec.ATTRIBUTE_MAX / 100)))
+        return record
+
+    def write_staff(self, unique_id: int, column: str, value: int) -> int:
+        """Write one staff field directly into FM27 live memory and verify read-back."""
+        self._require_write()
+        address = self.game.find_person(unique_id)
+        if not address:
+            raise EditError(f"Staff #{unique_id} is not in the live People vector.")
+        uid_bytes = self.game.read(address + M.PERSON_UNIQUE_ID_REL, 4)
+        if not uid_bytes or struct.unpack("<I", uid_bytes)[0] != unique_id:
+            raise EditError(f"Live record identity mismatch for staff #{unique_id}.")
+
+        if column in M.STAFF_DIRECT_FIELDS:
+            off, fmt = M.STAFF_DIRECT_FIELDS[column]
+            low, high = (1, 200) if column in ("ca", "pa") else (0, 10000)
+            clamped = max(low, min(high, int(value)))
+            target = address + off
+            new_bytes = struct.pack(fmt, clamped)
+            old_bytes = self.game.read(target, len(new_bytes)) or b""
+            self.game.write(target, new_bytes)
+            verify = self.game.read(target, len(new_bytes))
+            if verify != new_bytes:
+                raise EditError(f"Read-back failed after writing staff {column}.")
+            self._remember(target, old_bytes, f"staff:{unique_id}:{column}")
+            self.writes += 1
+            return clamped
+
+        if column in M.DIRECT_POSITIVE_FIELDS:
+            off, fmt = M.DIRECT_POSITIVE_FIELDS[column]
+            clamped = max(1, min(spec.ATTRIBUTE_MAX, int(value)))
+            target = address + off
+            new_bytes = struct.pack(fmt, clamped)
+            old_bytes = self.game.read(target, len(new_bytes)) or b""
+            self.game.write(target, new_bytes)
+            verify = self.game.read(target, len(new_bytes))
+            if verify != new_bytes:
+                raise EditError(f"Read-back failed after writing staff {column}.")
+            self._remember(target, old_bytes, f"staff:{unique_id}:{column}")
+            self.writes += 1
+            return clamped
+
+        if column in M.STAFF_ATTRIBUTE_OFFSETS:
+            off = M.STAFF_ATTRIBUTE_OFFSETS[column]
+            clamped = max(1, min(spec.ATTRIBUTE_MAX, int(value)))
+            stored = max(1, min(100, clamped * 5))
+            target = address + off
+            new_bytes = struct.pack("<B", stored)
+            old_bytes = self.game.read(target, 1) or b""
+            self.game.write(target, new_bytes)
+            verify = self.game.read(target, 1)
+            if verify != new_bytes:
+                raise EditError(f"Read-back failed after writing staff {column}.")
+            self._remember(target, old_bytes, f"staff:{unique_id}:{column}")
+            self.writes += 1
+            return clamped
+
+        raise EditError(f"Staff column {column!r} cannot be written to live memory.")
+
     def read_live_values(self, unique_id: int) -> dict[str, Any] | None:
         """Every live value for one player, or None when he is not found.
 

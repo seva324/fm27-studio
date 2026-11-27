@@ -1,6 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
+echo [FM27 Studio] Starting local server... Keep this window open while using FM27 Studio.
 
 set "PY312=%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
 if exist "%PY312%" (

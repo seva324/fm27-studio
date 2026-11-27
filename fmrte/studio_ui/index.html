@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>FM27 Studio — Live Editor &amp; AI Assistant</title>
+  <link rel="icon" type="image/png" href="/logo.png" />
   <link rel="stylesheet" href="/studio.css" />
 </head>
 <body>
@@ -12,7 +13,7 @@
   <!-- TOP EDITORIAL COMMAND BAR -->
   <header class="topbar">
     <div class="brand" id="brandHome" title="Open My Club">
-      <div class="brand-dot">F</div>
+      <div class="brand-dot"><img src="/logo.png" alt="FM27 Studio" /></div>
       <span>FM27 Studio<span class="brand-accent-dot"></span></span>
     </div>
 
@@ -29,9 +30,9 @@
       <span id="liveText">Snapshot Only</span>
     </div>
 
-    <button class="mag-cta magnetic" id="btnAttach" title="Attach to running Football Manager 27">
+    <button class="mag-cta magnetic" id="btnAttach" title="Attach to running Football Manager 27 &amp; refresh live RAM">
       <span id="btnAttachLabel">Load Game</span>
-      <span class="orb">→</span>
+      <span class="orb"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 6h7"/><path d="M6.5 3l3 3-3 3"/></svg></span>
     </button>
 
     <button class="icon-btn magnetic" id="btnUndo" title="Undo (Ctrl+Z)">↶</button>
@@ -125,7 +126,7 @@
           <span>AI Assistant</span>
         </div>
         <div class="ai-head-btns">
-          <button class="icon-btn icon-sm magnetic" id="btnNewChat" title="New Chat">+</button>
+          <button class="icon-btn icon-sm magnetic" id="btnNewChatTop" title="New Chat">+</button>
           <button class="icon-btn icon-sm magnetic" id="btnAiSettings" title="AI Provider &amp; API Key">⚙</button>
           <button class="icon-btn icon-sm magnetic" id="closeRight" title="Collapse AI Panel">×</button>
         </div>
@@ -151,6 +152,11 @@
       <div class="ai-body" id="aiBody">
         <!-- CHAT TAB -->
         <div class="ai-panel-view active" id="aiViewChat">
+          <div class="chat-sess-bar">
+            <select id="chatSessionSelect" class="mini-select" style="flex:1;min-width:0;height:27px;font-size:11px;" title="Switch saved chat history"></select>
+            <button class="mini-btn mini-btn-dark" id="btnNewChat" style="height:27px;padding:0 9px;font-size:11px;" title="Start a new chat">+ New</button>
+            <button class="mini-btn" id="btnDeleteChat" style="height:27px;padding:0 7px;font-size:11px;" title="Delete current chat">🗑</button>
+          </div>
           <div id="chatThread" class="chat-thread"></div>
         </div>
 
@@ -275,12 +281,14 @@
         <div class="ai-panel-view" id="aiViewTraining">
           <div class="plan-controls">
             <select id="trainingFocusSelect" class="mini-select">
-              <option value="Balanced">Balanced</option>
-              <option value="Attacking">Attacking</option>
-              <option value="Defending">Defending</option>
-              <option value="Tactical">Tactical</option>
-              <option value="Physical">Physical</option>
-              <option value="Recovery">Recovery</option>
+              <option value="Balanced">Balanced (S24)</option>
+              <option value="Tactical">Tactical / Familiarity (S24)</option>
+              <option value="Pressing">Pressing / Defending</option>
+              <option value="Attacking">Attacking / Chances</option>
+              <option value="Ball control">Ball Control</option>
+              <option value="Physical">Sharpness / Condition</option>
+              <option value="Recovery">Recovery / Rest</option>
+              <option value="Team bonding">Team Bonding</option>
             </select>
             <button class="mini-btn magnetic" id="btnRebuildTraining">Generate Week</button>
           </div>
@@ -323,7 +331,7 @@
               </select>
               <button class="mag-cta mag-cta-sm magnetic" id="btnSend">
                 <span>Send</span>
-                <span class="orb">→</span>
+                <span class="orb"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 6h7"/><path d="M6.5 3l3 3-3 3"/></svg></span>
               </button>
             </div>
           </div>
@@ -343,7 +351,7 @@
     <div class="status-right">
       <span>Zoom</span>
       <input type="range" min="85" max="130" value="100" id="zoomSlider" />
-      <span id="zoomLabel">100%</span>
+      <span id="zoomLabel" title="Double-click to reset to 100%">100%</span>
     </div>
   </footer>
 

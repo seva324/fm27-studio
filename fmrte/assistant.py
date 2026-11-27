@@ -26,6 +26,7 @@ Nothing here writes into the game. The assistant proposes; the person applies.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -454,6 +455,94 @@ def _status_message(status: int) -> str:
         "try again later.")
 
 
+_TRANSIENT_HTTP_STATUSES = frozenset({502, 503, 504, 520, 522, 524})
+_HTTP_MAX_RETRIES = 2
+
+
+def _reassemble_sse_response(response: Any) -> dict[str, Any]:
+    """Read an OpenAI-compatible SSE stream into a standard chat.completion dict."""
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    tool_calls_by_idx: dict[int, dict[str, Any]] = {}
+    usage: dict[str, Any] | None = None
+    total_bytes = 0
+
+    for raw_line in response:
+        total_bytes += len(raw_line)
+        if total_bytes > MAX_RESPONSE_BYTES:
+            raise AssistantError(
+                "The provider's reply is too large. Ask a narrower question.")
+        line = raw_line.decode("utf-8", "replace").strip()
+        if not line or line.startswith(":"):
+            continue
+        if not line.startswith("data:"):
+            continue
+        data_str = line[5:].strip()
+        if not data_str or data_str == "[DONE]":
+            break
+        try:
+            chunk = json.loads(data_str)
+        except ValueError:
+            continue
+        if not isinstance(chunk, dict):
+            continue
+        if chunk.get("error"):
+            err = chunk["error"]
+            if isinstance(err, dict):
+                err = err.get("message") or err.get("code") or "error"
+            raise AssistantError(f"The provider reported: {err}")
+        if isinstance(chunk.get("usage"), dict):
+            usage = chunk["usage"]
+        choices = chunk.get("choices")
+        if not isinstance(choices, list) or not choices:
+            continue
+        delta = (choices[0] or {}).get("delta")
+        if not isinstance(delta, dict):
+            continue
+        c = delta.get("content")
+        if isinstance(c, str) and c:
+            content_parts.append(c)
+        for rkey in ("reasoning_content", "reasoning", "thinking"):
+            r = delta.get(rkey)
+            if isinstance(r, str) and r:
+                reasoning_parts.append(r)
+                break
+        tcs = delta.get("tool_calls")
+        if isinstance(tcs, list):
+            for item in tcs:
+                if not isinstance(item, dict):
+                    continue
+                idx = int(item.get("index", len(tool_calls_by_idx)))
+                slot = tool_calls_by_idx.setdefault(idx, {
+                    "id": "",
+                    "type": "function",
+                    "function": {"name": "", "arguments": ""},
+                })
+                if item.get("id"):
+                    slot["id"] = str(item["id"])
+                if item.get("type"):
+                    slot["type"] = str(item["type"])
+                fn = item.get("function")
+                if isinstance(fn, dict):
+                    if fn.get("name"):
+                        slot["function"]["name"] += str(fn["name"])
+                    if fn.get("arguments"):
+                        slot["function"]["arguments"] += str(fn["arguments"])
+
+    msg: dict[str, Any] = {
+        "role": "assistant",
+        "content": "".join(content_parts),
+    }
+    if reasoning_parts:
+        msg["reasoning_content"] = "".join(reasoning_parts)
+    if tool_calls_by_idx:
+        msg["tool_calls"] = [tool_calls_by_idx[i] for i in sorted(tool_calls_by_idx)]
+    result: dict[str, Any] = {"choices": [{"index": 0, "message": msg}]}
+    if usage is not None:
+        result["usage"] = usage
+    return result
+
+
 def _http_chat(settings: AssistantSettings, key: str,
                messages: list[dict[str, Any]],
                tools: list[dict[str, Any]] | None = None,
@@ -466,7 +555,7 @@ def _http_chat(settings: AssistantSettings, key: str,
         "model": settings.model,
         "messages": messages,
         "temperature": settings.temperature,
-        "stream": False,
+        "stream": True,
     }
     effort = (settings.reasoning or "").strip().lower()
     if effort in ("low", "medium", "high"):
@@ -475,63 +564,96 @@ def _http_chat(settings: AssistantSettings, key: str,
         payload_dict["tools"] = tools
         payload_dict["tool_choice"] = "auto"
 
-    def _send_once(body_dict: dict[str, Any]) -> bytes:
+    def _send_once(body_dict: dict[str, Any]) -> dict[str, Any]:
         body = json.dumps(body_dict, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             _endpoint(settings.base_url), data=body, method="POST",
             headers={"Authorization": f"Bearer {key}",
                      "Content-Type": "application/json",
-                     "Accept": "application/json",
+                     "Accept": "text/event-stream, application/json",
+                     "Connection": "close",
                      "User-Agent": "FM27-Studio/1.0"})
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return response.read(MAX_RESPONSE_BYTES + 1)
-
-    try:
-        raw = _send_once(payload_dict)
-    except urllib.error.HTTPError as exc:
-        detail = ""
+            hdrs = getattr(response, "headers", None)
+            ctype = (hdrs.get("Content-Type", "") if hdrs else "").lower()
+            if "text/event-stream" in ctype:
+                return _reassemble_sse_response(response)
+            raw = response.read(MAX_RESPONSE_BYTES + 1)
+        if len(raw) > MAX_RESPONSE_BYTES:
+            raise AssistantError(
+                "The provider's reply is too large. Ask a narrower question.")
         try:
-            detail = exc.read(1024).decode("utf-8", "replace")
-        except Exception:
-            pass
-        # Graceful fallback if a model/gateway rejects reasoning_effort
-        if ("reasoning_effort" in payload_dict and exc.code in (400, 422)
-                and "reasoning" in detail.lower()):
-            retry_dict = dict(payload_dict)
-            retry_dict.pop("reasoning_effort", None)
+            parsed = json.loads(raw.decode("utf-8", "replace"))
+        except ValueError as exc:
+            raise AssistantError(
+                "The provider sent a reply this app cannot read.") from exc
+        if isinstance(parsed, dict) and parsed.get("error"):
+            message = parsed["error"]
+            if isinstance(message, dict):
+                message = message.get("message") or message.get("code") or "error"
+            raise AssistantError(f"The provider reported: {message}")
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _send_with_retry(body_dict: dict[str, Any]) -> dict[str, Any]:
+        last_exc: Exception | None = None
+        for attempt in range(_HTTP_MAX_RETRIES + 1):
             try:
-                raw = _send_once(retry_dict)
-            except urllib.error.HTTPError as exc2:
-                d2 = ""
-                try:
-                    d2 = exc2.read(1024).decode("utf-8", "replace")
-                except Exception:
-                    pass
-                raise AssistantError(_status_message(exc2.code), d2[:200],
-                                     status=exc2.code) from exc2
-        else:
+                return _send_once(body_dict)
+            except urllib.error.HTTPError as exc:
+                if exc.code in _TRANSIENT_HTTP_STATUSES and attempt < _HTTP_MAX_RETRIES:
+                    last_exc = exc
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                raise
+            except (http.client.HTTPException, ConnectionError, TimeoutError,
+                    urllib.error.URLError, OSError) as exc:
+                last_exc = exc
+                if attempt < _HTTP_MAX_RETRIES:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                raise
+        assert last_exc is not None
+        raise last_exc
+
+    active_payload = dict(payload_dict)
+    for _fallback_step in range(3):
+        try:
+            return _send_with_retry(active_payload)
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read(1024).decode("utf-8", "replace")
+            except Exception:
+                pass
+            low = detail.lower()
+            # Graceful fallback if a model/gateway rejects reasoning_effort or stream
+            if ("reasoning_effort" in active_payload and exc.code in (400, 422)
+                    and "reasoning" in low):
+                active_payload.pop("reasoning_effort", None)
+                continue
+            if (active_payload.get("stream") is True and exc.code in (400, 422)
+                    and "stream" in low):
+                active_payload["stream"] = False
+                continue
             raise AssistantError(_status_message(exc.code), detail[:200],
                                  status=exc.code) from exc
-    except urllib.error.URLError as exc:
-        raise AssistantError(
-            "The provider could not be reached. Check the connection.",
-            str(getattr(exc, "reason", ""))[:200]) from exc
-    except TimeoutError as exc:
-        raise AssistantError(
-            f"The provider did not answer within {int(timeout)} seconds.") from exc
-    if len(raw) > MAX_RESPONSE_BYTES:
-        raise AssistantError(
-            "The provider's reply is too large. Ask a narrower question.")
-    try:
-        payload = json.loads(raw.decode("utf-8", "replace"))
-    except ValueError as exc:
-        raise AssistantError("The provider sent a reply this app cannot read.") from exc
-    if isinstance(payload, dict) and payload.get("error"):
-        message = payload["error"]
-        if isinstance(message, dict):
-            message = message.get("message") or message.get("code") or "error"
-        raise AssistantError(f"The provider reported: {message}")
-    return payload if isinstance(payload, dict) else {}
+        except (http.client.HTTPException, ConnectionError) as exc:
+            raise AssistantError(
+                "The AI provider closed the connection before answering.",
+                f"Tried {_HTTP_MAX_RETRIES + 1} times ({exc}). Please retry or lower thinking effort."
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise AssistantError(
+                "The provider could not be reached. Check the connection.",
+                str(getattr(exc, "reason", ""))[:200]) from exc
+        except TimeoutError as exc:
+            raise AssistantError(
+                f"The provider did not answer within {int(timeout)} seconds.") from exc
+        except OSError as exc:
+            raise AssistantError(
+                "Network error while contacting the AI provider.",
+                str(exc)[:200]) from exc
+    raise AssistantError("The provider request failed after fallback retries.")
 
 
 def chat_completion(settings: AssistantSettings, key: str, prompt: str,
@@ -589,6 +711,24 @@ def _extract_reasoning(payload: Any) -> str:
     return ""
 
 
+def _extract_reasoning_tokens(payload: Any) -> int | None:
+    """Extract provider-reported reasoning token count if available."""
+    if not isinstance(payload, dict):
+        return None
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    details = usage.get("completion_tokens_details") or usage.get("output_tokens_details")
+    if isinstance(details, dict):
+        val = details.get("reasoning_tokens")
+        if isinstance(val, int) and val >= 0:
+            return val
+    direct = usage.get("reasoning_tokens")
+    if isinstance(direct, int) and direct >= 0:
+        return direct
+    return None
+
+
 def _strip_think_tags(text: str) -> str:
     if not text or "<think" not in text.lower():
         return text
@@ -643,16 +783,31 @@ def chat_with_tools(settings: AssistantSettings, key: str, db,
         f"{INSTRUCTIONS}\n\n"
         f"{knowledge_context()}\n\n"
         f"{save_context(db, club_name=active_club)}\n\n"
-        "You have FM27 tools to query live/snapshot players, clubs, staff, "
-        "fixtures, lineup optimization, squad-based tactic planning, training "
-        "schedules, transfer shortlists, replacements, Match Lab studies, "
-        "online FM-Arena/Sortitoutsi tactics, AND the native FM27 Tactics Lab "
-        "match engine (fm27_lab_status, fm27_lab_inspect_fmf, fm27_lab_load_save, "
-        "fm27_lab_run_ab_test, fm27_lab_jobs). "
-        "Use tools instead of guessing. Keep tool results concise. "
-        "When reporting native match-engine tests, always state verified match count "
-        "and validation_scope honestly; if fm27_lab_status shows installed=false, ask "
-        "the user whether they want to download https://github.com/seva324/fm-tactics-lab."
+        "You have live FM27 tools to query players, clubs, staff, fixtures, "
+        "lineup optimization, squad-based tactic planning, training schedules, "
+        "transfer shortlists, replacements, Match Lab studies, online "
+        "FM-Arena/Sortitoutsi tactics, AND direct control over the native FM27 "
+        "Tactics Lab match simulator (fm27_lab_status, fm27_lab_list_local, "
+        "fm27_lab_inspect_fmf, fm27_lab_load_save, fm27_lab_create_tactic, "
+        "fm27_lab_run_ab_test, fm27_lab_compare_tactics, fm27_lab_wait_job, "
+        "fm27_lab_cancel_job, fm27_lab_jobs, fm27_lab_download_engine). "
+        "When the user asks to design a custom tactic AND A/B test it against an "
+        "online/local tactic: "
+        "(1) Call fm27_lab_load_save (which returns the REAL current save squad "
+        "excluding loaned-out players AND discovers all real league opponents; pass "
+        "exclude_player_uids for injured/on-holiday players). "
+        "(2) Call fm27_lab_create_tactic to build and export a genuine native .fmf "
+        "tactic into FM27/tactics/. "
+        "(3) Call fm27_search_online_tactics to pick an FM-Arena benchmark tactic. "
+        "(4) Call fm27_lab_run_ab_test(tactic_a_kind='local_fmf', tactic_a_ref=<filename>, "
+        "tactic_b_kind='fm_arena', tactic_b_ref=<url>, mode='league', workers='auto', "
+        "opponent_count=..., matches_per_opponent=..., timeout_seconds=600). "
+        "Be efficient with tool calls — do not redundantly inspect every player one by one "
+        "when fm27_lab_load_save and fm27_analyze_squad already provide squad facts. "
+        "Always report verified_matches and validation_scope honestly; if "
+        "fm27_lab_status shows installed=false, ask the user whether they want to "
+        "download https://github.com/seva324/fm-tactics-lab and only call "
+        "fm27_lab_download_engine(confirm=true) after they agree."
     )
     emit({"type": "step", "stage": "context", "label": f"Loaded context ({active_club})",
           "ms": int((time.perf_counter() - t_ctx) * 1000)})
@@ -682,7 +837,8 @@ def chat_with_tools(settings: AssistantSettings, key: str, db,
 
     tools = fmtools.tool_definitions()
     total_calls = 0
-    for _round in range(10):
+    budget_hit = False
+    for _round in range(14):
         t_llm = time.perf_counter()
         try:
             payload = _http_chat(settings, key, messages, tools=tools, timeout=timeout)
@@ -702,8 +858,16 @@ def chat_with_tools(settings: AssistantSettings, key: str, db,
 
         llm_ms = int((time.perf_counter() - t_llm) * 1000)
         reasoning = _extract_reasoning(payload)
-        if reasoning:
-            emit({"type": "thinking", "text": reasoning, "round": _round + 1, "ms": llm_ms})
+        reasoning_tokens = _extract_reasoning_tokens(payload)
+        if reasoning or (reasoning_tokens is not None and reasoning_tokens > 0):
+            emit({
+                "type": "thinking",
+                "text": reasoning,
+                "round": _round + 1,
+                "ms": llm_ms,
+                "effort": settings.reasoning or "Default",
+                "reasoning_tokens": reasoning_tokens,
+            })
 
         choices = payload.get("choices") or []
         first = (choices[0] if choices else {}) or {}
@@ -724,13 +888,18 @@ def chat_with_tools(settings: AssistantSettings, key: str, db,
 
         for call in tool_calls:
             total_calls += 1
-            if total_calls > 24:
-                return _strip_think_tags(_extract_text(payload)) or (
-                    "Stopped after 24 tool calls in one turn; ask a narrower question.")
             call_id = str(call.get("id") or f"call_{total_calls}")
             fn = call.get("function") or {}
             fn_name = str(fn.get("name") or "")
             raw_args = fn.get("arguments") or "{}"
+            if total_calls > 36:
+                budget_hit = True
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": json.dumps({"error": "Tool call budget reached for this turn; summarize results now."}),
+                })
+                continue
             if on_status:
                 on_status(f"Running {fn_name}…")
             try:
@@ -741,14 +910,34 @@ def chat_with_tools(settings: AssistantSettings, key: str, db,
                 parsed_args = {}
             emit({"type": "tool_start", "id": call_id, "name": fn_name, "args": parsed_args})
             t_tool = time.perf_counter()
+
+            def _progress(msg: str, cid: str = call_id, fname: str = fn_name) -> None:
+                if on_status:
+                    on_status(msg)
+                emit({"type": "tool_progress", "id": cid, "name": fname, "message": str(msg)})
+
             result_obj = fmtools.execute_tool(
-                db, fn_name, parsed_args, default_club=active_club)
+                db, fn_name, parsed_args, default_club=active_club,
+                on_progress=_progress)
             tool_ms = int((time.perf_counter() - t_tool) * 1000)
             ok = not (isinstance(result_obj, dict) and result_obj.get("error"))
             summary = ""
             if isinstance(result_obj, dict):
                 if result_obj.get("error"):
                     summary = str(result_obj["error"])[:120]
+                elif isinstance(result_obj.get("best_tactic"), dict):
+                    bt = result_obj["best_tactic"]
+                    summary = f"Best: {bt.get('tactic_name')} ({bt.get('ppg')} PPG)"
+                elif isinstance(result_obj.get("result"), dict):
+                    res_j = result_obj["result"]
+                    win = res_j.get("winner") or res_j.get("status") or ""
+                    vm = res_j.get("verified_matches", 0)
+                    tot = res_j.get("total", 0)
+                    summary = f"{win} · {vm}/{tot} verified".strip(" ·")
+                elif "opponents_count" in result_obj and "club_name" in result_obj:
+                    summary = f"{result_obj['club_name']} · {result_obj['opponents_count']} opponents"
+                elif "filename" in result_obj and result_obj.get("ok"):
+                    summary = str(result_obj["filename"])[:80]
                 elif "count" in result_obj:
                     summary = f"{result_obj['count']} items"
                 elif "squad_size" in result_obj:
@@ -772,8 +961,30 @@ def chat_with_tools(settings: AssistantSettings, key: str, db,
                 "tool_call_id": call_id,
                 "content": result_str,
             })
+        if budget_hit:
+            break
 
-    return "Reached the tool-calling round limit; please ask a more specific follow-up."
+    # Graceful final synthesis without tools so the user never sees a raw cutoff error
+    try:
+        messages.append({
+            "role": "user",
+            "content": (
+                "Tool call limit reached for this turn. Using ONLY the real tool outputs "
+                "already collected above, give a clear, concise summary of what succeeded, "
+                "any running/completed Match Lab job IDs or exported .fmf files, and the "
+                "exact next step if anything remains."
+            ),
+        })
+        t_final = time.perf_counter()
+        final_payload = _http_chat(settings, key, messages, tools=None, timeout=timeout)
+        final_text = _strip_think_tags(_extract_text(final_payload))
+        emit({"type": "step", "stage": "answer", "label": "Summarized results",
+              "ms": int((time.perf_counter() - t_final) * 1000)})
+        if final_text:
+            return final_text
+    except Exception:  # noqa: BLE001
+        pass
+    return "Reached the tool-calling limit for this turn; please ask a follow-up to continue."
 
 
 def model_catalog(settings: AssistantSettings, key: str,
@@ -846,6 +1057,8 @@ def _cli_completion(settings: AssistantSettings, info: dict[str, Any],
     """Run a local coding-agent CLI and read its answer from stdout."""
     import shutil
     import subprocess
+    import sys
+    import tempfile
 
     executable = info.get("executable") or settings.provider
     path = shutil.which(executable)
@@ -853,8 +1066,26 @@ def _cli_completion(settings: AssistantSettings, info: dict[str, Any],
         raise AssistantError(
             f"The {info.get('label')} program was not found on this computer.",
             "Install it, or pick another provider in Settings.")
+    cli_args = list(info.get("args") or ["exec", "--skip-git-repo-check"])
+    tmp_mcp_cfg = ""
     try:
-        cli_args = list(info.get("args") or ["exec", "--skip-git-repo-check"])
+        # When running Claude Code CLI, auto-attach our zero-dependency MCP server
+        # so the CLI model can directly invoke FM27 + Match Lab simulation tools.
+        if settings.provider == "claude_code":
+            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            mcp_script = os.path.join(repo_root, "fm27_mcp_server.py")
+            if os.path.isfile(mcp_script):
+                fd, tmp_mcp_cfg = tempfile.mkstemp(prefix="fm27_mcp_", suffix=".json")
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    json.dump({
+                        "mcpServers": {
+                            "fm27-studio": {
+                                "command": sys.executable,
+                                "args": ["-S", mcp_script],
+                            }
+                        }
+                    }, handle)
+                cli_args = ["--mcp-config", tmp_mcp_cfg, *cli_args]
         result = subprocess.run(
             [path, *cli_args, prompt],
             capture_output=True, text=True, timeout=timeout,
@@ -865,6 +1096,12 @@ def _cli_completion(settings: AssistantSettings, info: dict[str, Any],
         ) from exc
     except OSError as exc:
         raise AssistantError(f"{info.get('label')} could not be started.") from exc
+    finally:
+        if tmp_mcp_cfg:
+            try:
+                os.remove(tmp_mcp_cfg)
+            except OSError:
+                pass
     text = (result.stdout or "").strip()
     if not text:
         detail = (result.stderr or "").strip().splitlines()

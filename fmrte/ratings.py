@@ -832,6 +832,70 @@ def role_label(player: dict[str, Any]) -> str:
     return ROLE_LABEL.get(role) or _humanise(role)
 
 
+def position_role_rating(player: dict[str, Any], position: str) -> tuple[float, str, int]:
+    """Rate a player specifically at ``position`` (e.g. ``'WBL'``, ``'DC'``, ``'ST'``).
+
+    Unlike :func:`role_rating` (which always scores the player's own best natural
+    position), this evaluates the player's best role inside the *requested*
+    position, blends with CA at ``CA_SHARE``, and applies FM's official
+    ``PositionRatingPenalties`` ladder for the player's competence (1..20) in
+    that exact position column.
+
+    Returns ``(rating_pct, best_role_display_name, position_competence)``.
+    """
+    raw_pos = str(position or "").strip()
+    label = spec.POSITION_LABELS.get(raw_pos, raw_pos.upper())
+    general = POSITION_TO_GENERAL.get(label)
+    if not general:
+        return role_rating(player), role_label(player), 0
+
+    roles = RATINGS.get(general) or {}
+    best_key_score = -1.0
+    best_role_key = DEFAULT_ROLE.get(general, "CentralMidfielder")
+    best_duty = "InPossession"
+    for role_key, duties in roles.items():
+        for duty_key, (key_cols, _pref_cols) in duties.items():
+            sc = _role_score(player, key_cols)
+            if sc > best_key_score:
+                best_key_score = sc
+                best_role_key = role_key
+                best_duty = duty_key
+
+    definition = roles.get(best_role_key, {}).get(best_duty)
+    r_score = (
+        _weighted_definition_score(player, definition[0], definition[1])
+        if definition else 0.0
+    )
+    try:
+        ca = int(player.get("ca") or 0)
+    except (TypeError, ValueError):
+        ca = 0
+    ca_ratio = max(0.0, min(1.0, ca / ABILITY_MAX))
+    share = ca_share()
+    base_ratio = share * ca_ratio + (1.0 - share) * r_score
+
+    # Exact position competence (1..20) for this specific slot (e.g. wing_back_left)
+    pos_col = spec.POSITION_LABEL_TO_COLUMN.get(label)
+    try:
+        comp = int(player.get(pos_col) or 0) if pos_col else _competence(player, general)
+    except (TypeError, ValueError):
+        comp = 0
+    best_comp = max((_competence(player, g) for g in GENERAL_ORDER), default=20)
+    penalty = 0
+    if len(POSITION_RATING_PENALTIES) == PENALTY_LADDER_LENGTH:
+        if comp <= 0:
+            penalty = POSITION_RATING_PENALTIES[0]
+        else:
+            # Penalty relative to natural 20 (or player's best competence when < 20)
+            ref = max(20, best_comp)
+            drop = max(0, ref - comp)
+            last = PENALTY_LADDER_LENGTH - 1
+            penalty = POSITION_RATING_PENALTIES[last - min(drop, last)]
+    adjusted_ratio = max(0.0, base_ratio * (1.0 - penalty / 100.0))
+    display_role = ROLE_LABEL.get(best_role_key) or _humanise(best_role_key)
+    return as_displayed(adjusted_ratio), display_role, comp
+
+
 # --- the ranges the original's own code enforces on every edit ------------
 # Declared once in spec.py (RANGES for the snapshot/screen domain, LIVE_RANGES
 # for the live-memory domain, and the one clamp both use).  This name is kept
